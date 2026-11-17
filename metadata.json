@@ -1,0 +1,6 @@
+{
+  "name": "HishabKhata Pro — Multi-Shop Business Accounting",
+  "description": "Full-stack multi-shop and multi-user business accounting software inspired by HishabPati, powered by Google Sheets Apps Script and Cloudflare Workers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
