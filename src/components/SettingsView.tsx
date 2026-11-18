@@ -125,6 +125,42 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [testResult, setTestResult] = useState<{ shopId: string; ok: boolean; msg: string } | null>(null);
   const [restoreConfirmShop, setRestoreConfirmShop] = useState<Shop | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
+  const [googleError, setGoogleError] = useState('');
+  const [googleSuccess, setGoogleSuccess] = useState('');
+
+  const handleConnectGoogleClick = async () => {
+    setConnectingGoogle(true);
+    setGoogleError('');
+    setGoogleSuccess('');
+    try {
+      await onConnectGoogle();
+      if (!activeShop.spreadsheetId) {
+        await onCreateSheetForShop(activeShop);
+        setGoogleSuccess(
+          lang === 'bn'
+            ? `গুগল অ্যাকাউন্ট যুক্ত হয়েছে এবং "${activeShop.name}"-এর জন্য নতুন Google Sheet তৈরি হয়ে সেট হয়েছে।`
+            : `Google connected and a dedicated Google Sheet has been created & linked to "${activeShop.name}".`
+        );
+      } else {
+        setGoogleSuccess(
+          lang === 'bn'
+            ? 'গুগল অ্যাকাউন্ট সফলভাবে যুক্ত হয়েছে।'
+            : 'Google account connected successfully.'
+        );
+      }
+    } catch (err) {
+      setGoogleError(
+        err instanceof Error
+          ? err.message
+          : lang === 'bn'
+          ? 'গুগল অ্যাকাউন্ট কানেক্ট করা যায়নি।'
+          : 'Failed to connect Google account.'
+      );
+    } finally {
+      setConnectingGoogle(false);
+    }
+  };
 
   // User Management & Granular Permissions
   const [uName, setUName] = useState('');
@@ -490,46 +526,95 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       {tab === 'shops' && (
         <div className="space-y-5">
           {/* Google Sheets OAuth Integration Card */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                {googleConnected ? (
-                  <Cloud className="w-5 h-5 text-emerald-600 shrink-0" />
-                ) : (
-                  <CloudOff className="w-5 h-5 text-slate-400 shrink-0" />
-                )}
-                <h2 className="text-sm font-bold text-slate-900">
-                  {lang === 'bn'
-                    ? 'Google Sheets অটো-সিঙ্ক ও রিস্টোর ইন্টিগ্রেশন'
-                    : 'Google Sheets Auto-Create, Real-Time Sync & Restore'}
-                </h2>
+          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  {googleConnected ? (
+                    <Cloud className="w-5 h-5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <CloudOff className="w-5 h-5 text-slate-400 shrink-0" />
+                  )}
+                  <h2 className="text-sm font-bold text-slate-900">
+                    {lang === 'bn'
+                      ? 'Google Sheets অটো-সিঙ্ক ও রিস্টোর ইন্টিগ্রেশন'
+                      : 'Google Sheets Auto-Create, Real-Time Sync & Restore'}
+                  </h2>
+                </div>
+                <p className="text-xs text-slate-600">
+                  {googleConnected
+                    ? lang === 'bn'
+                      ? `যুক্ত অ্যাকাউন্ট: ${googleEmail || 'Google Account'} — নতুন দোকান বানালেই অটো গুগল শিট তৈরি হবে এবং প্রতিটি লেনদেন রিয়েল-টাইমে সিঙ্ক হবে।`
+                      : `Connected as ${googleEmail || 'Google Account'} — New shops auto-create a dedicated Google Sheet with real-time sync and 1-click restore.`
+                    : lang === 'bn'
+                    ? 'প্রতিটি দোকানের জন্য অটোমেটিক নতুন গুগল শিট তৈরি, রিয়েল-টাইম সিঙ্ক ও রিস্টোর সুবিধা চালু করতে গুগল অ্যাকাউন্ট যুক্ত করুন।'
+                    : 'Connect your Google account to automatically create per-shop Google Sheets, sync in real time, and restore anytime.'}
+                </p>
               </div>
-              <p className="text-xs text-slate-600">
-                {googleConnected
-                  ? lang === 'bn'
-                    ? `যুক্ত অ্যাকাউন্ট: ${googleEmail || 'Google Account'} — নতুন দোকান বানালেই অটো গুগল শিট তৈরি হবে এবং প্রতিটি লেনদেন রিয়েল-টাইমে সিঙ্ক হবে।`
-                    : `Connected as ${googleEmail || 'Google Account'} — New shops auto-create a dedicated Google Sheet with real-time sync and 1-click restore.`
-                  : lang === 'bn'
-                  ? 'প্রতিটি দোকানের জন্য অটোমেটিক নতুন গুগল শিট তৈরি, রিয়েল-টাইম সিঙ্ক ও রিস্টোর সুবিধা চালু করতে গুগল অ্যাকাউন্ট যুক্ত করুন।'
-                  : 'Connect your Google account to automatically create per-shop Google Sheets, sync in real time, and restore anytime.'}
-              </p>
+              <div className="shrink-0">
+                {googleConnected ? (
+                  <button
+                    type="button"
+                    onClick={() => void onDisconnectGoogle()}
+                    className="h-9 px-3.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold text-slate-700"
+                  >
+                    {lang === 'bn' ? 'গুগল ডিসকানেক্ট' : 'Disconnect Google'}
+                  </button>
+                ) : (
+                  <GoogleSignInButton
+                    onClick={() => void handleConnectGoogleClick()}
+                    disabled={connectingGoogle}
+                    label={
+                      connectingGoogle
+                        ? lang === 'bn'
+                          ? 'যুক্ত হচ্ছে...'
+                          : 'Connecting...'
+                        : lang === 'bn'
+                        ? 'গুগল শিট যুক্ত করুন'
+                        : 'Sign in with Google'
+                    }
+                  />
+                )}
+              </div>
             </div>
-            <div className="shrink-0">
-              {googleConnected ? (
+
+            {googleError && (
+              <div
+                role="alert"
+                className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 flex items-start justify-between gap-3"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed break-all">{googleError}</span>
+                </div>
                 <button
                   type="button"
-                  onClick={() => void onDisconnectGoogle()}
-                  className="h-9 px-3.5 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold text-slate-700"
+                  onClick={() => setGoogleError('')}
+                  className="text-[11px] font-semibold text-red-700 hover:underline shrink-0"
                 >
-                  {lang === 'bn' ? 'গুগল ডিসকানেক্ট' : 'Disconnect Google'}
+                  {lang === 'bn' ? 'বন্ধ' : 'Dismiss'}
                 </button>
-              ) : (
-                <GoogleSignInButton
-                  onClick={() => void onConnectGoogle()}
-                  label={lang === 'bn' ? 'গুগল শিট যুক্ত করুন' : 'Sign in with Google'}
-                />
-              )}
-            </div>
+              </div>
+            )}
+
+            {googleSuccess && (
+              <div
+                role="status"
+                className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-start justify-between gap-3"
+              >
+                <div className="flex items-start gap-2">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{googleSuccess}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGoogleSuccess('')}
+                  className="text-[11px] font-semibold text-emerald-700 hover:underline shrink-0"
+                >
+                  {lang === 'bn' ? 'বন্ধ' : 'Dismiss'}
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">

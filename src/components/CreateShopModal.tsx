@@ -27,7 +27,20 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
   const [webhookUrl, setWebhookUrl] = useState('');
   const [securityPin, setSecurityPin] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
   const [error, setError] = useState('');
+
+  const handleConnectClick = async () => {
+    setConnectingGoogle(true);
+    setError('');
+    try {
+      await onConnectGoogle();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to connect Google account');
+    } finally {
+      setConnectingGoogle(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,8 +146,17 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
             </div>
             {!googleConnected && (
               <GoogleSignInButton
-                onClick={() => void onConnectGoogle()}
-                label={lang === 'bn' ? 'গুগল দিয়ে যুক্ত হন' : 'Sign in with Google'}
+                onClick={() => void handleConnectClick()}
+                disabled={connectingGoogle}
+                label={
+                  connectingGoogle
+                    ? lang === 'bn'
+                      ? 'যুক্ত হচ্ছে...'
+                      : 'Connecting...'
+                    : lang === 'bn'
+                    ? 'গুগল দিয়ে যুক্ত হন'
+                    : 'Sign in with Google'
+                }
               />
             )}
           </div>

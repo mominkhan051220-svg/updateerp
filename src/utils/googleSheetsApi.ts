@@ -4,6 +4,7 @@ import {
   CashAdjustment,
   DueSettlement,
   Expense,
+  Language,
   OnlineOrder,
   Party,
   Product,
@@ -16,6 +17,7 @@ import {
   Shop,
   StockMovement,
 } from '../types';
+import { formatGoogleSheetsApiError } from './googleSheetsError';
 
 export interface ShopDataSnapshot {
   version: 1;
@@ -81,7 +83,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       values: jsonChunks,
     },
     {
-      range: 'Products!A1:G' + Math.max(2, snapshot.products.length + 1),
+      range: 'Products!A1:G' + Math.max(1, snapshot.products.length + 1),
       values: [
         ['ID', 'Name', 'Barcode', 'Category', 'Unit', 'PurchasePrice', 'SellingPrice', 'Stock'].slice(0, 7),
         ...snapshot.products.map((p) => [
@@ -96,7 +98,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'Parties!A1:F' + Math.max(2, snapshot.parties.length + 1),
+      range: 'Parties!A1:F' + Math.max(1, snapshot.parties.length + 1),
       values: [
         ['ID', 'Name', 'Type', 'Phone', 'Address', 'PrevDueOrAdv'],
         ...snapshot.parties.map((p) => [
@@ -110,7 +112,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'Sales!A1:G' + Math.max(2, snapshot.sales.length + 1),
+      range: 'Sales!A1:G' + Math.max(1, snapshot.sales.length + 1),
       values: [
         ['InvoiceNo', 'Date', 'Customer', 'GrandTotal', 'Paid', 'Due', 'Status'],
         ...snapshot.sales.map((s) => [
@@ -125,7 +127,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'Purchases!A1:F' + Math.max(2, snapshot.purchases.length + 1),
+      range: 'Purchases!A1:F' + Math.max(1, snapshot.purchases.length + 1),
       values: [
         ['BillNo', 'Date', 'Supplier', 'GrandTotal', 'Paid', 'Due'],
         ...snapshot.purchases.map((p) => [
@@ -139,7 +141,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'DueSettlements!A1:F' + Math.max(2, snapshot.dueSettlements.length + 1),
+      range: 'DueSettlements!A1:F' + Math.max(1, snapshot.dueSettlements.length + 1),
       values: [
         ['Date', 'PartyName', 'Type', 'Amount', 'Method', 'Note'],
         ...snapshot.dueSettlements.map((d) => [
@@ -153,7 +155,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'Expenses!A1:E' + Math.max(2, snapshot.expenses.length + 1),
+      range: 'Expenses!A1:E' + Math.max(1, snapshot.expenses.length + 1),
       values: [
         ['Date', 'Category', 'Amount', 'Method', 'Note'],
         ...snapshot.expenses.map((e) => [
@@ -166,7 +168,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'BankTransactions!A1:F' + Math.max(2, snapshot.bankTransactions.length + 1),
+      range: 'BankTransactions!A1:F' + Math.max(1, snapshot.bankTransactions.length + 1),
       values: [
         ['Date', 'Account', 'Type', 'Amount', 'ReferenceID', 'Note'],
         ...snapshot.bankTransactions.map((t) => [
@@ -180,7 +182,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'CashAdjustments!A1:D' + Math.max(2, snapshot.cashAdjustments.length + 1),
+      range: 'CashAdjustments!A1:D' + Math.max(1, snapshot.cashAdjustments.length + 1),
       values: [
         ['Date', 'Type', 'Amount', 'Note'],
         ...snapshot.cashAdjustments.map((c) => [
@@ -192,7 +194,7 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       ],
     },
     {
-      range: 'Orders!A1:F' + Math.max(2, snapshot.salesOrders.length + snapshot.purchaseOrders.length + 1),
+      range: 'Orders!A1:F' + Math.max(1, snapshot.salesOrders.length + snapshot.purchaseOrders.length + 1),
       values: [
         ['OrderNo', 'OrderType', 'Date', 'Party', 'Total', 'Status'],
         ...snapshot.salesOrders.map((o) => [
@@ -219,7 +221,8 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
 export async function createShopSpreadsheet(
   accessToken: string,
   shop: Shop,
-  snapshot: ShopDataSnapshot
+  snapshot: ShopDataSnapshot,
+  lang: Language = 'bn'
 ): Promise<{ spreadsheetId: string; spreadsheetUrl: string }> {
   const createRes = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
     method: 'POST',
@@ -237,7 +240,7 @@ export async function createShopSpreadsheet(
 
   if (!createRes.ok) {
     const errText = await createRes.text();
-    throw new Error(`Google Sheets creation failed (${createRes.status}): ${errText}`);
+    throw formatGoogleSheetsApiError(createRes.status, errText, lang);
   }
 
   const created = (await createRes.json()) as {
@@ -254,7 +257,7 @@ export async function createShopSpreadsheet(
     },
   };
 
-  await syncShopToGoogleSheet(accessToken, created.spreadsheetId, boundSnapshot);
+  await syncShopToGoogleSheet(accessToken, created.spreadsheetId, boundSnapshot, lang);
   return {
     spreadsheetId: created.spreadsheetId,
     spreadsheetUrl: created.spreadsheetUrl,
@@ -264,7 +267,8 @@ export async function createShopSpreadsheet(
 export async function syncShopToGoogleSheet(
   accessToken: string,
   spreadsheetId: string,
-  snapshot: ShopDataSnapshot
+  snapshot: ShopDataSnapshot,
+  lang: Language = 'bn'
 ): Promise<{ updatedAt: string }> {
   // Clear ShopSnapshot tab first so stale chunks from a larger prior snapshot never remain
   await fetch(
@@ -296,7 +300,7 @@ export async function syncShopToGoogleSheet(
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Google Sheet sync failed (${res.status}): ${errText}`);
+    throw formatGoogleSheetsApiError(res.status, errText, lang);
   }
 
   return { updatedAt: new Date().toISOString() };
@@ -304,7 +308,8 @@ export async function syncShopToGoogleSheet(
 
 export async function restoreShopFromGoogleSheet(
   accessToken: string,
-  spreadsheetId: string
+  spreadsheetId: string,
+  lang: Language = 'bn'
 ): Promise<ShopDataSnapshot> {
   // Inspect spreadsheet metadata first to verify tab existence per sheets.md best practices
   const metaRes = await fetch(
@@ -318,7 +323,7 @@ export async function restoreShopFromGoogleSheet(
 
   if (!metaRes.ok) {
     const errText = await metaRes.text();
-    throw new Error(`Could not open Google Sheet (${metaRes.status}): ${errText}`);
+    throw formatGoogleSheetsApiError(metaRes.status, errText, lang);
   }
 
   const meta = (await metaRes.json()) as {
@@ -345,7 +350,7 @@ export async function restoreShopFromGoogleSheet(
 
   if (!valuesRes.ok) {
     const errText = await valuesRes.text();
-    throw new Error(`Failed reading Google Sheet data (${valuesRes.status}): ${errText}`);
+    throw formatGoogleSheetsApiError(valuesRes.status, errText, lang);
   }
 
   const body = (await valuesRes.json()) as { values?: string[][] };

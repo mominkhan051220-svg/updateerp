@@ -7,6 +7,10 @@ import {
   User,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { Language } from '../types';
+import { formatGoogleAuthError } from './googleAuthError';
+
+export { formatGoogleAuthError };
 
 export const GOOGLE_SHEETS_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
@@ -17,6 +21,7 @@ const provider = new GoogleAuthProvider();
 for (const scope of GOOGLE_SHEETS_SCOPES) {
   provider.addScope(scope);
 }
+provider.setCustomParameters({ prompt: 'consent select_account' });
 
 let isSigningIn = false;
 let cachedAccessToken: string | null = null;
@@ -38,17 +43,25 @@ export function initGoogleAuth(
   });
 }
 
-export async function connectGoogleSheetsAccount(): Promise<{ user: User; accessToken: string }> {
+export async function connectGoogleSheetsAccount(
+  lang: Language = 'bn'
+): Promise<{ user: User; accessToken: string }> {
   isSigningIn = true;
   try {
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (!credential?.accessToken) {
-      throw new Error('Could not obtain Google Sheets access token.');
+      throw new Error(
+        lang === 'bn'
+          ? 'Google Sheets অ্যাক্সেস টোকেন পাওয়া যায়নি। আবার চেষ্টা করে শীট পারমিশন দিন।'
+          : 'Could not obtain Google Sheets access token. Please try again and grant Sheets permission.'
+      );
     }
     cachedAccessToken = credential.accessToken;
     cachedGoogleUser = result.user;
     return { user: result.user, accessToken: cachedAccessToken };
+  } catch (err) {
+    throw new Error(formatGoogleAuthError(err, lang));
   } finally {
     isSigningIn = false;
   }
@@ -62,8 +75,12 @@ export function getConnectedGoogleUser(): User | null {
   return cachedGoogleUser;
 }
 
-export async function disconnectGoogleSheets(): Promise<void> {
+export function clearCachedGoogleAuth(): void {
   cachedAccessToken = null;
   cachedGoogleUser = null;
+}
+
+export async function disconnectGoogleSheets(): Promise<void> {
+  clearCachedGoogleAuth();
   await auth.signOut();
 }

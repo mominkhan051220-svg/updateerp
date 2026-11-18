@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Cloud, Loader2, Lock } from 'lucide-react';
+import { AlertTriangle, Cloud, Loader2, Lock, X } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { UserAuthModal } from './components/UserAuthModal';
@@ -59,6 +59,7 @@ import {
   restoreShopFromGoogleSheet,
   syncShopToGoogleSheet,
 } from './utils/googleSheetsApi';
+import { GoogleSheetsApiError } from './utils/googleSheetsError';
 import { applyRestoredShopSnapshot, buildShopSnapshot } from './utils/shopSnapshot';
 
 const LANG_PREF_KEY = 'hishabkhata_lang';
@@ -105,6 +106,7 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [createShopOpen, setCreateShopOpen] = useState(false);
+  const [creatingSheet, setCreatingSheet] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{
     status: 'synced' | 'local_only' | 'error';
     message: string;
@@ -194,10 +196,11 @@ export default function App() {
   );
 
   const handleConnectGoogle = useCallback(async (): Promise<string> => {
-    const { user, accessToken } = await connectGoogleSheetsAccount();
+    const { user, accessToken } = await connectGoogleSheetsAccount(stateRef.current.language);
     googleAccessTokenRef.current = accessToken;
     setGoogleConnected(true);
     setGoogleEmail(user.email);
+    setSyncFeedback(null);
     return accessToken;
   }, []);
 
@@ -584,21 +587,36 @@ export default function App() {
     const token = googleAccessTokenRef.current ?? (await handleConnectGoogle());
     const snapshot = buildShopSnapshot(stateRef.current, targetShop.id);
     if (!snapshot) throw new Error('Shop not found');
-    const created = await createShopSpreadsheet(token, targetShop, snapshot);
-    const nowIso = new Date().toISOString();
-    const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
-      method: 'POST',
-      body: JSON.stringify({
-        shopId: targetShop.id,
-        spreadsheetId: created.spreadsheetId,
-        spreadsheetUrl: created.spreadsheetUrl,
-        lastSyncStatus: 'synced',
-        lastSyncedAt: nowIso,
-        lastSyncMessage: 'Google Sheet created & synced',
-      }),
-    });
-    setState(statusRes.state);
-    setSyncFeedback({ status: 'synced', message: 'Google Sheet created & synced' });
+    const lang = stateRef.current.language;
+
+    try {
+      const created = await createShopSpreadsheet(token, targetShop, snapshot, lang);
+      const nowIso = new Date().toISOString();
+      const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+        method: 'POST',
+        body: JSON.stringify({
+          shopId: targetShop.id,
+          spreadsheetId: created.spreadsheetId,
+          spreadsheetUrl: created.spreadsheetUrl,
+          lastSyncStatus: 'synced',
+          lastSyncedAt: nowIso,
+          lastSyncMessage: 'Google Sheet created & synced',
+        }),
+      });
+      setState(statusRes.state);
+      setSyncFeedback({
+        status: 'synced',
+        message:
+          lang === 'bn'
+            ? `"${targetShop.name}"-এর জন্য নতুন Google Sheet তৈরি হয়ে যুক্ত হয়েছে।`
+            : `Google Sheet created and linked to "${targetShop.name}".`,
+      });
+    } catch (err) {
+      if (err instanceof GoogleSheetsApiError && err.requiresReauth) {
+        await handleDisconnectGoogle().catch(() => {});
+      }
+      throw err;
+    }
   };
 
   const handleUpdateShop = async (updated: Shop) => {
@@ -818,12 +836,62 @@ export default function App() {
           onLogout={() => void handleLogout()}
           googleConnected={googleConnected}
           onConnectGoogle={async () => {
-            await handleConnectGoogle();
+            try {
+              await handleConnectGoogle();
+              if (!activeShop.spreadsheetId) {
+                await handleCreateSheetForShop(activeShop);
+              }
+            } catch (err) {
+              setSyncFeedback({
+                status: 'error',
+                message: err instanceof Error ? err.message : 'Failed to connect Google Sheets',
+              });
+            }
           }}
           syncFeedback={syncFeedback}
         />
 
         <main className="flex-1 p-4 lg:p-6 max-w-[1440px] w-full mx-auto space-y-4">
+          {syncFeedback?.status === 'error' && (
+            <div
+              role="alert"
+              className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start justify-between gap-3 no-print"
+            >
+              <div className="flex items-start gap-2 text-xs text-red-800 font-medium">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span className="leading-relaxed break-all">{syncFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                aria-label={state.language === 'bn' ? 'বার্তা বন্ধ করুন' : 'Dismiss error'}
+                onClick={() => setSyncFeedback(null)}
+                className="p-1 rounded-md text-red-600 hover:bg-red-100 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {syncFeedback?.status === 'synced' && (
+            <div
+              role="status"
+              className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 flex items-center justify-between gap-3 no-print"
+            >
+              <div className="flex items-center gap-2 text-xs text-emerald-900 font-medium">
+                <Cloud className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{syncFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                aria-label={state.language === 'bn' ? 'বার্তা বন্ধ করুন' : 'Dismiss'}
+                onClick={() => setSyncFeedback(null)}
+                className="p-1 rounded-md text-emerald-700 hover:bg-emerald-100 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
           {!hasSheetConnected && !isShopPinLocked && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 no-print">
               <div className="flex items-center gap-2 text-xs text-amber-900 font-medium">
@@ -837,10 +905,33 @@ export default function App() {
               {currentUser.role === 'admin' && (
                 <button
                   type="button"
-                  onClick={() => void handleCreateSheetForShop(activeShop)}
-                  className="h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+                  disabled={creatingSheet}
+                  onClick={async () => {
+                    setCreatingSheet(true);
+                    try {
+                      await handleCreateSheetForShop(activeShop);
+                    } catch (err) {
+                      setSyncFeedback({
+                        status: 'error',
+                        message:
+                          err instanceof Error ? err.message : 'Failed to create Google Sheet',
+                      });
+                    } finally {
+                      setCreatingSheet(false);
+                    }
+                  }}
+                  className="h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold whitespace-nowrap shrink-0 inline-flex items-center justify-center gap-1.5 disabled:opacity-60"
                 >
-                  {state.language === 'bn' ? 'গুগল শিট তৈরি ও যুক্ত করুন' : 'Create & Link Google Sheet'}
+                  {creatingSheet && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>
+                    {creatingSheet
+                      ? state.language === 'bn'
+                        ? 'যুক্ত হচ্ছে...'
+                        : 'Connecting...'
+                      : state.language === 'bn'
+                      ? 'গুগল শিট তৈরি ও যুক্ত করুন'
+                      : 'Create & Link Google Sheet'}
+                  </span>
                 </button>
               )}
             </div>
