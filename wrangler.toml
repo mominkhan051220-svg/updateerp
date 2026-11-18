@@ -1,3 +1,13 @@
 name = "hishabkhata-pro"
 compatibility_date = "2025-01-01"
 pages_build_output_dir = "dist"
+
+# Cloudflare Pages KV Binding (Required for persistent users, shops, secrets & Google Sheet links on Cloudflare):
+# In Cloudflare Dashboard -> Pages -> hishabkhata-pro -> Settings -> Functions -> KV namespace bindings:
+#   Variable name: HISHAB_KV
+#   KV namespace:  (select your created KV namespace)
+#
+# Optional Environment Variables / Secrets in Cloudflare Pages -> Settings -> Environment variables:
+#   AUTH_SESSION_SECRET (min 32 random chars)
+#   ADMIN_EMAIL         (optional custom bootstrap admin email)
+#   ADMIN_PASSWORD_HASH (optional PBKDF2-SHA256 hash)

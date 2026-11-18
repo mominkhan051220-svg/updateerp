@@ -420,6 +420,12 @@ export function canAccessMenu(user: UserAccount, menu: MenuKey): boolean {
   return Boolean(user.permissions[menu]);
 }
 
+export function canAccessShop(user: UserAccount, shopId: string): boolean {
+  if (!shopId) return false;
+  if (user.role === 'admin') return true;
+  return (user.assignedShopId || user.allowedShopIds[0]) === shopId;
+}
+
 export function getAllowedShopsForUser<T extends { id: string }>(user: UserAccount, shops: T[]): T[] {
   if (user.role === 'admin') return shops;
   const targetId = user.assignedShopId || user.allowedShopIds[0];
@@ -444,7 +450,10 @@ export function applySaleStockDelta(products: Product[], items: LineItem[], dire
 
 export function generateCsvContent(headers: string[], rows: Array<Array<string | number>>): string {
   const escapeCell = (val: string | number) => {
-    const str = String(val ?? '');
+    let str = String(val ?? '');
+    if (/^[=+\-@\t\r]/.test(str)) {
+      str = `'${str}`;
+    }
     if (str.includes(',') || str.includes('"') || str.includes('\n')) {
       return `"${str.replace(/"/g, '""')}"`;
     }

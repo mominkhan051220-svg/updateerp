@@ -9,28 +9,33 @@ export interface SheetSyncResult {
 export async function syncRecordToGoogleSheet(
   shop: Shop | undefined,
   collection: string,
-  action: 'upsert' | 'delete' | 'ping' | 'full_sync',
-  record: unknown
+  action: 'upsert' | 'delete' | 'ping' | 'full_sync' | 'save_snapshot',
+  record: unknown,
+  fullSnapshot?: unknown
 ): Promise<SheetSyncResult> {
-  if (!shop || !shop.webhookUrl.trim()) {
+  if (!shop || (!shop.hasWebhookUrl && !shop.webhookUrl?.trim())) {
     return {
       synced: false,
       status: 'local_only',
-      message: 'No Google Sheet Webhook URL bound to this shop yet (saved locally).',
+      message: 'No Google Sheet Webhook URL bound to this shop yet.',
     };
   }
 
   try {
     const res = await fetch('/api/sheets/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
       body: JSON.stringify({
-        webhookUrl: shop.webhookUrl.trim(),
         shopId: shop.id,
         shopName: shop.name,
         action,
         collection,
         record,
+        fullSnapshot,
       }),
     });
 
@@ -57,8 +62,11 @@ export async function syncRecordToGoogleSheet(
   }
 }
 
-export async function testGoogleSheetWebhook(shop: Shop): Promise<SheetSyncResult> {
-  if (!shop.webhookUrl.trim()) {
+export async function testGoogleSheetWebhook(
+  shop: Shop,
+  candidateWebhookUrl?: string
+): Promise<SheetSyncResult> {
+  if (!candidateWebhookUrl?.trim() && !shop.hasWebhookUrl) {
     return {
       synced: false,
       status: 'error',
@@ -69,11 +77,15 @@ export async function testGoogleSheetWebhook(shop: Shop): Promise<SheetSyncResul
   try {
     const res = await fetch('/api/sheets/test', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
       body: JSON.stringify({
-        webhookUrl: shop.webhookUrl.trim(),
         shopId: shop.id,
         shopName: shop.name,
+        webhookUrl: candidateWebhookUrl?.trim() || undefined,
       }),
     });
     const data = await res.json();

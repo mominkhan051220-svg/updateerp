@@ -1,62 +1,96 @@
 import React, { useState } from 'react';
-import { Building2, KeyRound, Lock, ShieldCheck, UserCheck } from 'lucide-react';
-import { Language, Shop, UserAccount } from '../types';
+import { KeyRound, Loader2 } from 'lucide-react';
+import { AppState, Language, UserAccount } from '../types';
 import { UI_TEXT } from '../utils/i18n';
 
 interface LoginPageProps {
   lang: Language;
   onChangeLang: (lang: Language) => void;
-  users: UserAccount[];
-  shops: Shop[];
-  onLoginSuccess: (user: UserAccount) => void;
+  onLoginSuccess: (payload: {
+    user: UserAccount;
+    state: AppState;
+    unlockedShopIds: string[];
+  }) => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({
   lang,
   onChangeLang,
-  users,
-  shops,
   onLoginSuccess,
 }) => {
-  const [username, setUsername] = useState('');
+  const [emailOrUsername, setEmailOrUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const matched = users.find(
-      (u) => u.username.toLowerCase() === username.trim().toLowerCase() && u.password === password
-    );
-    if (!matched) {
+    setError('');
+    setSubmitting(true);
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({
+          username: emailOrUsername.trim(),
+          password,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        authenticated?: boolean;
+        user?: UserAccount;
+        state?: AppState;
+        unlockedShopIds?: string[];
+        message?: string;
+      };
+
+      if (!res.ok || !data.authenticated || !data.user || !data.state) {
+        setError(
+          res.status >= 500 || res.status === 429
+            ? data.message ||
+              (lang === 'bn'
+                ? 'সাময়িক ত্রুটি হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।'
+                : 'Server error or rate limit reached. Please try again.')
+            : lang === 'bn'
+            ? 'ভুল ইমেল বা পাসওয়ার্ড দেওয়া হয়েছে।'
+            : 'Invalid email or password.'
+        );
+        return;
+      }
+
+      setPassword('');
+      onLoginSuccess({
+        user: data.user,
+        state: data.state,
+        unlockedShopIds: data.unlockedShopIds ?? [],
+      });
+    } catch {
       setError(
         lang === 'bn'
-          ? 'ভুল ইউজারনেম বা পাসওয়ার্ড দেওয়া হয়েছে।'
-          : 'Invalid username or password.'
+          ? 'সার্ভারের সাথে সংযোগ করা যায়নি। আবার চেষ্টা করুন।'
+          : 'Unable to reach authentication server.'
       );
-      return;
+    } finally {
+      setSubmitting(false);
     }
-    setError('');
-    onLoginSuccess(matched);
   };
-
-  const getShopName = (shopId: string) =>
-    shops.find((s) => s.id === shopId)?.name ?? (lang === 'bn' ? 'সকল দোকান' : 'All Shops');
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
-      <div className="w-full max-w-md space-y-5">
+      <div className="w-full max-w-sm space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-lg bg-emerald-600 text-white flex items-center justify-center font-bold text-lg">
               হ
             </div>
-            <div>
-              <div className="font-bold text-lg tracking-tight text-slate-900 leading-tight">
-                {UI_TEXT.appName[lang]}
-              </div>
-              <div className="text-xs text-slate-500">
-                {lang === 'bn' ? 'মাল্টি-শপ বিজনেস অ্যাকাউন্টিং' : 'Multi-Shop Business Accounting'}
-              </div>
+            <div className="font-bold text-lg tracking-tight text-slate-900">
+              {UI_TEXT.appName[lang]}
             </div>
           </div>
 
@@ -87,31 +121,26 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-          <div>
-            <h1 className="text-lg font-bold text-slate-900">
-              {lang === 'bn' ? 'অ্যাকাউন্টে লগইন করুন' : 'Sign In to Your Account'}
-            </h1>
-            <p className="text-xs text-slate-500 mt-1">
-              {lang === 'bn'
-                ? 'এডমিন সকল দোকান পরিবর্তন করতে পারবেন। স্টাফ ইউজার কেবল তার নির্ধারিত দোকানে লগইন হবেন।'
-                : 'Admins can manage and switch all shops. Staff members sign directly into their assigned shop.'}
-            </p>
-          </div>
+          <h1 className="text-lg font-bold text-slate-900">
+            {lang === 'bn' ? 'লগইন করুন' : 'Sign In'}
+          </h1>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4">
             <div>
-              <label htmlFor="login-username" className="block text-xs font-semibold text-slate-700 mb-1">
-                {lang === 'bn' ? 'ইউজারনেম (Username)' : 'Username'}
+              <label htmlFor="login-email" className="block text-xs font-semibold text-slate-700 mb-1">
+                {lang === 'bn' ? 'ইমেল ঠিকানা (Email)' : 'Email'}
               </label>
               <input
-                id="login-username"
+                id="login-email"
                 type="text"
-                value={username}
+                inputMode="email"
+                autoComplete="username"
+                value={emailOrUsername}
                 onChange={(e) => {
-                  setUsername(e.target.value);
+                  setEmailOrUsername(e.target.value);
                   setError('');
                 }}
-                placeholder="admin / salesman / karim_staff"
+                placeholder="name@example.com"
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 required
               />
@@ -124,12 +153,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
               <input
                 id="login-password"
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => {
                   setPassword(e.target.value);
                   setError('');
                 }}
-                placeholder="••••"
+                placeholder="••••••••"
                 className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
                 required
               />
@@ -143,52 +173,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
             <button
               type="submit"
-              className="w-full h-10 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+              disabled={submitting}
+              className="w-full h-10 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
             >
-              <KeyRound className="w-4 h-4" />
+              {submitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
               <span>{lang === 'bn' ? 'লগইন করুন' : 'Sign In'}</span>
             </button>
           </form>
-
-          <div className="border-t border-slate-200 pt-4 space-y-2.5">
-            <div className="text-xs font-semibold text-slate-600">
-              {lang === 'bn' ? 'ইউজার তালিকা (দ্রুত লগইন ও টেস্ট)' : 'Available Accounts (Quick Login)'}
-            </div>
-            <div className="space-y-2 max-h-56 overflow-y-auto">
-              {users.map((u) => (
-                <button
-                  key={u.id}
-                  type="button"
-                  onClick={() => onLoginSuccess(u)}
-                  className="w-full flex items-center justify-between p-2.5 rounded-lg border border-slate-200 hover:border-emerald-400 hover:bg-emerald-50/40 text-left transition-colors"
-                >
-                  <div className="min-w-0 pr-2">
-                    <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                      {u.role === 'admin' ? (
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                      ) : (
-                        <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                      )}
-                      <span className="truncate">{u.name}</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1.5 truncate">
-                      <span className="font-mono">@{u.username}</span>
-                      <span>·</span>
-                      <Building2 className="w-3 h-3 shrink-0" />
-                      <span className="truncate">
-                        {u.role === 'admin'
-                          ? lang === 'bn'
-                            ? 'সকল দোকান (Admin)'
-                            : 'All Shops (Admin)'
-                          : getShopName(u.assignedShopId)}
-                      </span>
-                    </div>
-                  </div>
-                  <UserCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
     </div>

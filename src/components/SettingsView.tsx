@@ -10,11 +10,15 @@ import {
   Database,
   Download,
   ExternalLink,
+  KeyRound,
   Loader2,
+  Lock,
   Plus,
   RefreshCw,
   RotateCcw,
   Shield,
+  Trash2,
+  Unlock,
   Users,
 } from 'lucide-react';
 import {
@@ -38,23 +42,42 @@ interface SettingsViewProps {
   shops: Shop[];
   activeShop: Shop;
   users: UserAccount[];
+  currentUserId: string;
   googleConnected: boolean;
   googleEmail?: string | null;
-  onConnectGoogle: () => Promise<void>;
+  onConnectGoogle: () => Promise<string>;
   onDisconnectGoogle: () => Promise<void>;
-  onCreateShop: (shop: Shop) => Promise<void>;
-  onUpdateShop: (shop: Shop) => void;
+  onCreateShop: (shop: Shop, options?: { webhookUrl?: string; securityPin?: string }) => Promise<void>;
+  onUpdateShop: (shop: Shop) => Promise<void>;
+  onUpdateShopSecurity: (
+    shopId: string,
+    updates: {
+      webhookUrl?: string;
+      clearWebhook?: boolean;
+      rotateSecret?: boolean;
+      securityPin?: string;
+      removePin?: boolean;
+    }
+  ) => Promise<{ rotatedSecretOnce?: string }>;
   onCreateSheetForShop: (shop: Shop) => Promise<void>;
   onRestoreShopFromSheet: (shop: Shop) => Promise<void>;
-  onCreateUser: (user: UserAccount) => void;
+  onCreateUser: (payload: {
+    name: string;
+    username: string;
+    password: string;
+    role: UserRole;
+    assignedShopId: string;
+    permissions: Record<MenuKey, boolean>;
+  }) => Promise<void>;
   onUpdateUserPermissions: (
     userId: string,
     permissions: Record<MenuKey, boolean>,
     allowedShopIds: string[],
     assignedShopId?: string
-  ) => void;
+  ) => Promise<void>;
+  onDeleteUser: (userId: string) => Promise<void>;
   onSyncShopNow: (shop: Shop) => Promise<void>;
-  onResetAllData: () => void;
+  onResetAllData: () => Promise<void>;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
@@ -63,16 +86,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   shops,
   activeShop,
   users,
+  currentUserId,
   googleConnected,
   googleEmail,
   onConnectGoogle,
   onDisconnectGoogle,
   onCreateShop,
   onUpdateShop,
+  onUpdateShopSecurity,
   onCreateSheetForShop,
   onRestoreShopFromSheet,
   onCreateUser,
   onUpdateUserPermissions,
+  onDeleteUser,
   onSyncShopNow,
   onResetAllData,
 }) => {
@@ -83,14 +109,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [shopPhone, setShopPhone] = useState('');
   const [shopAddress, setShopAddress] = useState('');
   const [shopWebhook, setShopWebhook] = useState('');
-  const [shopCap, setShopCap] = useState('50000');
+  const [shopPin, setShopPin] = useState('');
+  const [shopCap, setShopCap] = useState('0');
   const [creatingShop, setCreatingShop] = useState(false);
   const [shopNotice, setShopNotice] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  // Apps Script Modal & Webhook / Sheet operations
+  // Apps Script Modal & Webhook / Sheet / Security operations
   const [showScriptModal, setShowScriptModal] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
   const [webhookEdits, setWebhookEdits] = useState<Record<string, string>>({});
+  const [pinEdits, setPinEdits] = useState<Record<string, string>>({});
+  const [revealedSecrets, setRevealedSecrets] = useState<Record<string, string>>({});
   const [testingShopId, setTestingShopId] = useState<string | null>(null);
   const [busyShopId, setBusyShopId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ shopId: string; ok: boolean; msg: string } | null>(null);
@@ -107,6 +136,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     ...STAFF_DEFAULT_PERMISSIONS,
   });
   const [userNotice, setUserNotice] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [confirmDeleteUserId, setConfirmDeleteUserId] = useState<string | null>(null);
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
 
   // Confirm Reset Dialog
   const [confirmReset, setConfirmReset] = useState(false);
@@ -134,9 +165,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const newShop: Shop = {
         id: `shop_${Date.now()}`,
         name: shopName.trim(),
-        phone: shopPhone.trim() || '01700-000000',
-        address: shopAddress.trim() || 'Dhaka, Bangladesh',
-        webhookUrl: shopWebhook.trim(),
+        phone: shopPhone.trim(),
+        address: shopAddress.trim(),
         lastSyncStatus: 'idle',
         printerFormat: 'thermal_80',
         initialCapital: Number(shopCap) || 0,
@@ -149,17 +179,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         },
         createdAt: new Date().toISOString().slice(0, 10),
       };
-      await onCreateShop(newShop);
+      await onCreateShop(newShop, {
+        webhookUrl: shopWebhook.trim() || undefined,
+        securityPin: shopPin.trim() || undefined,
+      });
       setShopName('');
       setShopPhone('');
       setShopAddress('');
       setShopWebhook('');
+      setShopPin('');
       setShopNotice({
         ok: true,
         msg: googleConnected
           ? lang === 'bn'
-            ? `"${newShop.name}" তৈরি হয়েছে এবং এর নিজস্ব Google Sheet যুক্ত হয়েছে।`
-            : `"${newShop.name}" created with its dedicated Google Sheet.`
+            ? `"${newShop.name}" তৈরি হয়েছে এবং এর নিজস্ব Google Sheet ও সিকিউরিটি যুক্ত হয়েছে।`
+            : `"${newShop.name}" created with its dedicated Google Sheet and security.`
           : lang === 'bn'
           ? `"${newShop.name}" সফলভাবে তৈরি হয়েছে।`
           : `"${newShop.name}" created successfully.`,
@@ -174,12 +208,117 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const handleSaveWebhook = async (shop: Shop) => {
+    const url = (webhookEdits[shop.id] ?? '').trim();
+    if (!url) return;
+    setBusyShopId(shop.id);
+    setTestResult(null);
+    try {
+      await onUpdateShopSecurity(shop.id, { webhookUrl: url });
+      setWebhookEdits((prev) => ({ ...prev, [shop.id]: '' }));
+      setTestResult({
+        shopId: shop.id,
+        ok: true,
+        msg:
+          lang === 'bn'
+            ? 'দোকানের Webhook URL নিরাপদভাবে সার্ভারে এনক্রিপ্টেড/সংরক্ষিত হয়েছে।'
+            : 'Shop Webhook URL saved securely on server.',
+      });
+    } catch (err) {
+      setTestResult({
+        shopId: shop.id,
+        ok: false,
+        msg: err instanceof Error ? err.message : 'Failed to save Webhook URL.',
+      });
+    } finally {
+      setBusyShopId(null);
+    }
+  };
+
+  const handleRotateSecret = async (shop: Shop) => {
+    setBusyShopId(shop.id);
+    setTestResult(null);
+    try {
+      const res = await onUpdateShopSecurity(shop.id, { rotateSecret: true });
+      if (res.rotatedSecretOnce) {
+        setRevealedSecrets((prev) => ({ ...prev, [shop.id]: res.rotatedSecretOnce! }));
+      }
+      setTestResult({
+        shopId: shop.id,
+        ok: true,
+        msg:
+          lang === 'bn'
+            ? 'দোকানের নতুন সিক্রেট কী তৈরি হয়েছে। Apps Script-এর SHOP_SECRET-এ আপডেট করুন।'
+            : 'New per-shop secret generated. Update SHOP_SECRET in Apps Script.',
+      });
+    } catch (err) {
+      setTestResult({
+        shopId: shop.id,
+        ok: false,
+        msg: err instanceof Error ? err.message : 'Failed to rotate shop secret.',
+      });
+    } finally {
+      setBusyShopId(null);
+    }
+  };
+
+  const handleSaveShopPin = async (shop: Shop) => {
+    const pin = (pinEdits[shop.id] ?? '').trim();
+    if (pin.length < 4) {
+      setTestResult({
+        shopId: shop.id,
+        ok: false,
+        msg:
+          lang === 'bn'
+            ? 'দোকানের পিন কমপক্ষে ৪ অক্ষরের হতে হবে।'
+            : 'Shop PIN must be at least 4 characters.',
+      });
+      return;
+    }
+    setBusyShopId(shop.id);
+    try {
+      await onUpdateShopSecurity(shop.id, { securityPin: pin });
+      setPinEdits((prev) => ({ ...prev, [shop.id]: '' }));
+      setTestResult({
+        shopId: shop.id,
+        ok: true,
+        msg:
+          lang === 'bn'
+            ? 'এই দোকানের নিজস্ব সিকিউরিটি পিন চালু করা হয়েছে।'
+            : 'Per-shop security PIN enabled.',
+      });
+    } catch (err) {
+      setTestResult({
+        shopId: shop.id,
+        ok: false,
+        msg: err instanceof Error ? err.message : 'Failed to set PIN.',
+      });
+    } finally {
+      setBusyShopId(null);
+    }
+  };
+
+  const handleRemoveShopPin = async (shop: Shop) => {
+    setBusyShopId(shop.id);
+    try {
+      await onUpdateShopSecurity(shop.id, { removePin: true });
+      setTestResult({
+        shopId: shop.id,
+        ok: true,
+        msg:
+          lang === 'bn'
+            ? 'দোকানের সিকিউরিটি পিন লক বন্ধ করা হয়েছে।'
+            : 'Per-shop security PIN removed.',
+      });
+    } finally {
+      setBusyShopId(null);
+    }
+  };
+
   const handleTestWebhook = async (shop: Shop) => {
-    const url = webhookEdits[shop.id] ?? shop.webhookUrl;
-    const updatedShop = { ...shop, webhookUrl: url };
-    onUpdateShop(updatedShop);
+    const candidateUrl = (webhookEdits[shop.id] ?? '').trim() || undefined;
     setTestingShopId(shop.id);
-    const res = await testGoogleSheetWebhook(updatedShop);
+    const res = await testGoogleSheetWebhook(shop, candidateUrl);
     setTestingShopId(null);
     setTestResult({ shopId: shop.id, ok: res.synced, msg: res.message });
   };
@@ -209,18 +348,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleSyncClick = async (shop: Shop) => {
-    const currentUrl = webhookEdits[shop.id] ?? shop.webhookUrl;
     setBusyShopId(shop.id);
     setTestResult(null);
     try {
-      await onSyncShopNow({ ...shop, webhookUrl: currentUrl.trim() });
+      const pendingUrl = (webhookEdits[shop.id] ?? '').trim();
+      if (pendingUrl) {
+        await onUpdateShopSecurity(shop.id, { webhookUrl: pendingUrl });
+        setWebhookEdits((prev) => ({ ...prev, [shop.id]: '' }));
+      }
+      await onSyncShopNow(shop);
       setTestResult({
         shopId: shop.id,
         ok: true,
         msg:
           lang === 'bn'
-            ? 'দোকানের ডেটা গুগল শিটে রিয়েল-টাইম সিঙ্ক হয়েছে।'
-            : 'Shop data synced to Google Sheet successfully.',
+            ? 'দোকানের ডেটা সরাসরি গুগল শিটে সিঙ্ক হয়েছে।'
+            : 'Shop data synced directly to Google Sheet.',
       });
     } catch (err) {
       setTestResult({
@@ -259,46 +402,49 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedUsername = uUsername.trim();
     if (!uName.trim() || !trimmedUsername || !uPassword.trim()) return;
 
-    if (users.some((u) => u.username.toLowerCase() === trimmedUsername.toLowerCase())) {
+    if (uPassword.length < 6) {
       setUserNotice({
         ok: false,
         msg:
           lang === 'bn'
-            ? 'এই ইউজারনেমটি ইতোমধ্যে ব্যবহৃত হয়েছে।'
-            : 'Username already exists.',
+            ? 'পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের হতে হবে।'
+            : 'Password must be at least 6 characters.',
       });
       return;
     }
 
     const assignedId = uRole === 'admin' ? shops[0]?.id ?? activeShop.id : uAssignedShopId || activeShop.id;
-    const created: UserAccount = {
-      id: `user_${Date.now()}`,
-      name: uName.trim(),
-      username: trimmedUsername,
-      password: uPassword,
-      role: uRole,
-      assignedShopId: assignedId,
-      allowedShopIds: uRole === 'admin' ? shops.map((s) => s.id) : [assignedId],
-      permissions: uRole === 'admin' ? { ...FULL_PERMISSIONS } : { ...uPermissions },
-      createdAt: new Date().toISOString().slice(0, 10),
-    };
-    onCreateUser(created);
-    setUName('');
-    setUUsername('');
-    setUPassword('');
-    const targetShopName = shops.find((s) => s.id === assignedId)?.name ?? assignedId;
-    setUserNotice({
-      ok: true,
-      msg:
-        lang === 'bn'
-          ? `ইউজার "${created.username}" (${targetShopName}) তৈরি হয়েছে।`
-          : `User "${created.username}" assigned to "${targetShopName}" created.`,
-    });
+    try {
+      await onCreateUser({
+        name: uName.trim(),
+        username: trimmedUsername,
+        password: uPassword,
+        role: uRole,
+        assignedShopId: assignedId,
+        permissions: uRole === 'admin' ? { ...FULL_PERMISSIONS } : { ...uPermissions },
+      });
+      setUName('');
+      setUUsername('');
+      setUPassword('');
+      const targetShopName = shops.find((s) => s.id === assignedId)?.name ?? assignedId;
+      setUserNotice({
+        ok: true,
+        msg:
+          lang === 'bn'
+            ? `ইউজার "${trimmedUsername}" (${targetShopName}) তৈরি হয়েছে।`
+            : `User "${trimmedUsername}" assigned to "${targetShopName}" created.`,
+      });
+    } catch (err) {
+      setUserNotice({
+        ok: false,
+        msg: err instanceof Error ? err.message : 'Failed to create user.',
+      });
+    }
   };
 
   return (
@@ -447,15 +593,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 />
               </div>
               <div>
+                <label htmlFor="set-shop-pin" className="block text-xs font-medium text-slate-600 mb-1">
+                  {lang === 'bn' ? 'ঐচ্ছিক: দোকানের সিকিউরিটি পিন' : 'Optional: Shop Security PIN'}
+                </label>
+                <input
+                  id="set-shop-pin"
+                  type="password"
+                  autoComplete="new-password"
+                  value={shopPin}
+                  onChange={(e) => setShopPin(e.target.value)}
+                  placeholder={lang === 'bn' ? '৪+ অক্ষরের পিন' : '4+ char PIN'}
+                  className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs"
+                />
+              </div>
+              <div>
                 <label htmlFor="set-shop-webhook" className="block text-xs font-medium text-slate-600 mb-1">
                   {lang === 'bn' ? 'ঐচ্ছিক: Apps Script Webhook URL' : 'Optional: Apps Script Webhook URL'}
                 </label>
                 <input
                   id="set-shop-webhook"
-                  type="text"
+                  type="password"
+                  autoComplete="off"
                   value={shopWebhook}
                   onChange={(e) => setShopWebhook(e.target.value)}
-                  placeholder="https://script.google.com/macros/s/.../exec"
+                  placeholder="https://script.google.com/macros/s/..."
                   className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono"
                 />
               </div>
@@ -501,19 +662,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div className="lg:col-span-8 space-y-3">
               {shops.map((s) => {
-                const currentUrl = webhookEdits[s.id] ?? s.webhookUrl;
+                const pendingUrl = webhookEdits[s.id] ?? '';
+                const pendingPin = pinEdits[s.id] ?? '';
+                const revealedSecret = revealedSecrets[s.id];
                 const isBusy = busyShopId === s.id;
+                const hasAnySheet = Boolean(s.spreadsheetId || s.hasWebhookUrl);
                 return (
                   <div key={s.id} className="bg-white border border-slate-200 rounded-xl p-5 space-y-3.5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <div>
                         <div className="text-sm font-bold text-slate-900">{s.name}</div>
                         <div className="text-xs text-slate-500">
-                          {s.phone} · {s.address}
+                          {s.phone || '—'} {s.address ? `· ${s.address}` : ''}
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
-                        {s.spreadsheetId ? (
+                        {s.pinProtected && (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200">
+                            <Lock className="w-3 h-3" />
+                            <span>{lang === 'bn' ? 'পিন লক চালু' : 'PIN Locked'}</span>
+                          </span>
+                        )}
+                        {hasAnySheet ? (
                           <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
                             <Cloud className="w-3 h-3" />
                             <span>
@@ -531,8 +701,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                             </span>
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded bg-slate-100 text-slate-600">
-                            {lang === 'bn' ? 'লোকাল' : 'Local Only'}
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">
+                            {lang === 'bn' ? 'শিট সংযুক্ত নেই' : 'Sheet Not Linked'}
                           </span>
                         )}
                         <span className="text-xs font-mono text-slate-400">ID: {s.id}</span>
@@ -559,11 +729,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                               </span>
                             )}
                           </div>
+                        ) : s.hasWebhookUrl ? (
+                          <span className="text-emerald-700 font-medium font-mono text-[11px]">
+                            {s.maskedWebhookUrl}
+                          </span>
                         ) : (
                           <span className="text-slate-600">
                             {lang === 'bn'
-                              ? 'এই দোকানের জন্য এখনো কোনো Google Sheet তৈরি হয়নি।'
-                              : 'No dedicated Google Sheet linked to this shop yet.'}
+                              ? 'সরাসরি Google Sheet-এ সেভ চালু করতে নিচের বাটনে শিট যুক্ত করুন।'
+                              : 'Link a dedicated Google Sheet to save every input directly.'}
                           </span>
                         )}
                       </div>
@@ -593,7 +767,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           <span>{lang === 'bn' ? 'সিঙ্ক' : 'Sync Now'}</span>
                         </button>
 
-                        {s.spreadsheetId && (
+                        {(s.spreadsheetId || s.hasWebhookUrl) && (
                           <button
                             type="button"
                             disabled={isBusy}
@@ -607,40 +781,150 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Optional Apps Script Webhook Row */}
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <div className="flex-1">
-                        <label htmlFor={`wh-${s.id}`} className="block text-[11px] font-medium text-slate-600 mb-1">
-                          {lang === 'bn'
-                            ? 'ঐচ্ছিক: Apps Script Webhook URL (Cloudflare / Script)'
-                            : 'Optional: Apps Script Webhook URL'}
-                        </label>
-                        <input
-                          id={`wh-${s.id}`}
-                          type="text"
-                          value={currentUrl}
-                          onChange={(e) => setWebhookEdits((prev) => ({ ...prev, [s.id]: e.target.value }))}
-                          placeholder="https://script.google.com/macros/s/.../exec"
-                          className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono"
-                        />
+                    {/* Per-Shop Individual Security & Secret Panel */}
+                    <div className="p-3 rounded-lg bg-slate-50/70 border border-slate-200 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="text-xs flex items-center gap-1.5 text-slate-700">
+                          <KeyRound className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          <span className="font-semibold">
+                            {lang === 'bn' ? 'দোকানের নিজস্ব সিক্রেট কী:' : 'Per-Shop Secret Key:'}
+                          </span>
+                          <span className="font-mono text-slate-500">
+                            {s.maskedSheetSecret || 'hk_shop_••••••••'}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => void handleRotateSecret(s)}
+                          className="h-7 px-2.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-[11px] font-semibold text-slate-700 whitespace-nowrap"
+                        >
+                          {lang === 'bn' ? 'নতুন সিক্রেট কী তৈরি করুন' : 'Rotate Shop Secret'}
+                        </button>
                       </div>
-                      <div className="flex items-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onUpdateShop({ ...s, webhookUrl: currentUrl.trim() })}
-                          className="h-9 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold whitespace-nowrap"
-                        >
-                          {lang === 'bn' ? 'বাইন্ড সেভ' : 'Save URL'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={testingShopId === s.id}
-                          onClick={() => handleTestWebhook(s)}
-                          className="h-9 px-3 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap"
-                        >
-                          <Database className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>{testingShopId === s.id ? '...' : (lang === 'bn' ? 'টেস্ট' : 'Test')}</span>
-                        </button>
+
+                      {revealedSecret && (
+                        <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-xs space-y-1.5">
+                          <div className="font-semibold text-amber-900">
+                            {lang === 'bn'
+                              ? 'একবারই দেখানো হচ্ছে — Apps Script-এ SHOP_SECRET হিসেবে সেট করে লুকিয়ে রাখুন:'
+                              : 'Shown once — copy into Apps Script SHOP_SECRET Property and dismiss:'}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <code className="flex-1 px-2 py-1 rounded bg-white border border-amber-200 font-mono text-[11px] break-all">
+                              {revealedSecret}
+                            </code>
+                            <button
+                              type="button"
+                              onClick={() => navigator.clipboard?.writeText(revealedSecret)}
+                              className="h-7 px-2 rounded bg-amber-700 text-white text-[11px] font-semibold"
+                            >
+                              {lang === 'bn' ? 'কপি' : 'Copy'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setRevealedSecrets((prev) => {
+                                  const next = { ...prev };
+                                  delete next[s.id];
+                                  return next;
+                                })
+                              }
+                              className="h-7 px-2 rounded border border-amber-300 text-amber-900 text-[11px] font-semibold"
+                            >
+                              {lang === 'bn' ? 'লুকান' : 'Hide'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Per-Shop Security PIN Lock */}
+                      <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-slate-200/80">
+                        <div className="flex-1">
+                          <label htmlFor={`pin-${s.id}`} className="block text-[11px] font-medium text-slate-600 mb-1">
+                            {lang === 'bn'
+                              ? s.pinProtected
+                                ? 'দোকানের সিকিউরিটি পিন পরিবর্তন করুন (বর্তমানে লক চালু)'
+                                : 'দোকানের নিজস্ব সিকিউরিটি পিন সেট করুন (ঐচ্ছিক)'
+                              : s.pinProtected
+                              ? 'Update Per-Shop Security PIN (Currently Active)'
+                              : 'Set Per-Shop Security PIN (Optional)'}
+                          </label>
+                          <input
+                            id={`pin-${s.id}`}
+                            type="password"
+                            autoComplete="new-password"
+                            value={pendingPin}
+                            onChange={(e) => setPinEdits((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                            placeholder={lang === 'bn' ? 'নতুন ৪+ অক্ষরের পিন' : 'Enter 4+ char PIN'}
+                            className="w-full h-8 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                          />
+                        </div>
+                        <div className="flex items-end gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isBusy || !pendingPin.trim()}
+                            onClick={() => void handleSaveShopPin(s)}
+                            className="h-8 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50"
+                          >
+                            <Lock className="w-3 h-3" />
+                            <span>{lang === 'bn' ? 'পিন সেভ' : 'Set PIN'}</span>
+                          </button>
+                          {s.pinProtected && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => void handleRemoveShopPin(s)}
+                              className="h-8 px-2.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold inline-flex items-center gap-1"
+                            >
+                              <Unlock className="w-3 h-3" />
+                              <span>{lang === 'bn' ? 'পিন সরান' : 'Remove PIN'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Encrypted Server-Side Apps Script Webhook Binding */}
+                      <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-slate-200/80">
+                        <div className="flex-1">
+                          <label htmlFor={`wh-${s.id}`} className="block text-[11px] font-medium text-slate-600 mb-1">
+                            {lang === 'bn'
+                              ? s.hasWebhookUrl
+                                ? `Apps Script Webhook যুক্ত আছে (${s.maskedWebhookUrl}) — পরিবর্তন করতে নতুন URL দিন`
+                                : 'ঐচ্ছিক: Apps Script Webhook URL যুক্ত করুন'
+                              : s.hasWebhookUrl
+                              ? `Webhook Linked (${s.maskedWebhookUrl}) — enter new URL to replace`
+                              : 'Optional: Bind Apps Script Webhook URL'}
+                          </label>
+                          <input
+                            id={`wh-${s.id}`}
+                            type="password"
+                            autoComplete="off"
+                            value={pendingUrl}
+                            onChange={(e) => setWebhookEdits((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                            placeholder="https://script.google.com/macros/s/..."
+                            className="w-full h-8 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                          />
+                        </div>
+                        <div className="flex items-end gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isBusy || !pendingUrl.trim()}
+                            onClick={() => void handleSaveWebhook(s)}
+                            className="h-8 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold whitespace-nowrap disabled:opacity-50"
+                          >
+                            {lang === 'bn' ? 'বাইন্ড সেভ' : 'Save URL'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={testingShopId === s.id || (!s.hasWebhookUrl && !pendingUrl.trim())}
+                            onClick={() => void handleTestWebhook(s)}
+                            className="h-8 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+                          >
+                            <Database className="w-3.5 h-3.5 text-emerald-600" />
+                            <span>{testingShopId === s.id ? '...' : (lang === 'bn' ? 'টেস্ট' : 'Test')}</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -663,7 +947,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
       {tab === 'users' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          <form onSubmit={handleCreateUser} className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-4 h-fit">
+          <form onSubmit={(e) => void handleCreateUser(e)} className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-4 h-fit">
             <h2 className="text-sm font-bold text-slate-900">
               {lang === 'bn' ? 'নতুন ইউজার ও গ্রানুলার পারমিশন' : 'Create User & Menu Permissions'}
             </h2>
@@ -701,7 +985,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label htmlFor="usr-uname" className="block text-xs font-medium text-slate-600 mb-1">
-                  {lang === 'bn' ? 'ইউজারনেম (Username)' : 'Username'}
+                  {lang === 'bn' ? 'ইমেল / ইউজারনেম' : 'Email / Username'}
                 </label>
                 <input
                   id="usr-uname"
@@ -794,26 +1078,121 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </form>
 
           <div className="lg:col-span-7 space-y-3">
+            {users.filter((u) => u.role === 'admin').length <= 1 && (
+              <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs text-sky-900">
+                {lang === 'bn'
+                  ? 'ডিফল্ট বা বর্তমান অ্যাডমিন ইমেইল ডিলিট করতে চাইলে প্রথমে বাম পাশের ফর্ম থেকে আরেকটি নতুন অ্যাডমিন (Admin) ইউজার তৈরি করুন — তারপর যেকোনো অ্যাডমিন ইমেইল ডিলিট করা যাবে।'
+                  : 'To delete the default or current admin email, first create another Admin user on the left — then any admin email can be permanently deleted.'}
+              </div>
+            )}
             {users.map((u) => {
               const assignedShop = shops.find((s) => s.id === u.assignedShopId);
+              const adminCount = users.filter((item) => item.role === 'admin').length;
+              const isOnlyAdmin = u.role === 'admin' && adminCount <= 1;
+              const isSelf = u.id === currentUserId;
+              const isConfirmingDelete = confirmDeleteUserId === u.id;
               return (
                 <div key={u.id} className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div>
-                      <div className="text-sm font-bold text-slate-900">{u.name}</div>
-                      <div className="text-xs text-slate-500 font-mono">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-slate-900 truncate">{u.name}</span>
+                        {isSelf && (
+                          <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            {lang === 'bn' ? 'বর্তমান অ্যাকাউন্ট' : 'You'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-slate-500 font-mono truncate">
                         @{u.username} · {u.role.toUpperCase()}
                         {u.role === 'staff' && assignedShop ? ` · ${assignedShop.name}` : ''}
                       </div>
                     </div>
-                    <span className="text-xs font-semibold text-emerald-700">
-                      {u.role === 'admin'
-                        ? lang === 'bn'
-                          ? 'সকল মেনু ও সকল দোকান'
-                          : 'All Menus & All Shops'
-                        : `${ALL_MENU_KEYS.filter((k) => u.permissions[k]).length} / ${ALL_MENU_KEYS.length} menus`}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs font-semibold text-emerald-700">
+                        {u.role === 'admin'
+                          ? lang === 'bn'
+                            ? 'সকল মেনু ও সকল দোকান'
+                            : 'All Menus & All Shops'
+                          : `${ALL_MENU_KEYS.filter((k) => u.permissions[k]).length} / ${ALL_MENU_KEYS.length} menus`}
+                      </span>
+                      {!isConfirmingDelete && (
+                        <button
+                          type="button"
+                          disabled={isOnlyAdmin || deletingUserId === u.id}
+                          title={
+                            isOnlyAdmin
+                              ? lang === 'bn'
+                                ? 'শেষ অ্যাডমিন ডিলিট করার আগে আরেকটি অ্যাডমিন তৈরি করুন'
+                                : 'Create another admin before deleting the last admin'
+                              : lang === 'bn'
+                              ? 'ইউজার ডিলিট করুন'
+                              : 'Delete user'
+                          }
+                          onClick={() => setConfirmDeleteUserId(u.id)}
+                          className="h-7 px-2.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-45 disabled:cursor-not-allowed"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>{lang === 'bn' ? 'ডিলিট' : 'Delete'}</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
+
+                  {isConfirmingDelete && (
+                    <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-red-800">
+                        {isSelf
+                          ? lang === 'bn'
+                            ? `আপনার নিজের অ্যাকাউন্ট (${u.username}) স্থায়ীভাবে ডিলিট করবেন? ডিলিট করলে লগআউট হয়ে লগইন পেইজে চলে যাবে।`
+                            : `Permanently delete your own account (${u.username})? You will be signed out.`
+                          : lang === 'bn'
+                          ? `ইউজার "${u.username}"-কে স্থায়ীভাবে ডিলিট করবেন?`
+                          : `Permanently delete user "${u.username}"?`}
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={deletingUserId === u.id}
+                          onClick={async () => {
+                            setDeletingUserId(u.id);
+                            setUserNotice(null);
+                            try {
+                              await onDeleteUser(u.id);
+                              setConfirmDeleteUserId(null);
+                              setUserNotice({
+                                ok: true,
+                                msg:
+                                  lang === 'bn'
+                                    ? `ইউজার "${u.username}" স্থায়ীভাবে ডিলিট করা হয়েছে।`
+                                    : `User "${u.username}" permanently deleted.`,
+                              });
+                            } catch (err) {
+                              setConfirmDeleteUserId(null);
+                              setUserNotice({
+                                ok: false,
+                                msg: err instanceof Error ? err.message : 'Failed to delete user.',
+                              });
+                            } finally {
+                              setDeletingUserId(null);
+                            }
+                          }}
+                          className="h-7 px-2.5 rounded-md bg-red-600 hover:bg-red-700 text-white text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-60"
+                        >
+                          {deletingUserId === u.id && <Loader2 className="w-3 h-3 animate-spin" />}
+                          <span>{lang === 'bn' ? 'হ্যাঁ, ডিলিট করুন' : 'Confirm Delete'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={deletingUserId === u.id}
+                          onClick={() => setConfirmDeleteUserId(null)}
+                          className="h-7 px-2.5 rounded-md border border-slate-300 bg-white text-slate-700 text-xs font-semibold"
+                        >
+                          {lang === 'bn' ? 'বাতিল' : 'Cancel'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {u.role === 'staff' && (
                     <>
@@ -829,7 +1208,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           value={u.assignedShopId}
                           onChange={(e) => {
                             const nextShopId = e.target.value;
-                            onUpdateUserPermissions(u.id, u.permissions, [nextShopId], nextShopId);
+                            void onUpdateUserPermissions(u.id, u.permissions, [nextShopId], nextShopId);
                           }}
                           className="h-8 px-2.5 rounded-lg border border-slate-300 text-xs font-medium bg-slate-50"
                         >
@@ -848,7 +1227,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                               type="checkbox"
                               checked={Boolean(u.permissions[key])}
                               onChange={(e) =>
-                                onUpdateUserPermissions(
+                                void onUpdateUserPermissions(
                                   u.id,
                                   { ...u.permissions, [key]: e.target.checked },
                                   [u.assignedShopId],
@@ -884,7 +1263,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 id="set-printer"
                 value={activeShop.printerFormat}
                 onChange={(e) =>
-                  onUpdateShop({ ...activeShop, printerFormat: e.target.value as PrinterFormat })
+                  void onUpdateShop({ ...activeShop, printerFormat: e.target.value as PrinterFormat })
                 }
                 className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs"
               >
@@ -926,8 +1305,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </h2>
             <p className="text-xs text-slate-600">
               {lang === 'bn'
-                ? 'সকল লোকাল লেনদেন রিসেট করে প্রারম্ভিক ডেমো অবস্থায় ফিরে যেতে নিচের বাটন ব্যবহার করুন।'
-                : 'Reset all local transactions and restore initial multi-shop demo data.'}
+                ? 'সকল লেনদেন রিসেট করে প্রারম্ভিক শূন্য অবস্থায় ফিরে যেতে নিচের বাটন ব্যবহার করুন।'
+                : 'Reset all transactions and start with a clean account state.'}
             </p>
             {!confirmReset ? (
               <button
@@ -947,7 +1326,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      onResetAllData();
+                      void onResetAllData();
                       setConfirmReset(false);
                     }}
                     className="h-8 px-3 rounded bg-red-600 text-white text-xs font-semibold"
@@ -989,8 +1368,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
                   {lang === 'bn'
-                    ? 'এই দোকানের লোকাল ডেটা (পণ্য, পার্টি, বিক্রয়, ক্রয়, খরচ ও হিসাব) এর নিজস্ব Google Sheet-এ থাকা সর্বশেষ ব্যাকআপ দিয়ে প্রতিস্থাপন করা হবে।'
-                    : 'Local data for this shop (products, parties, sales, purchases, expenses, and accounts) will be replaced with the backup stored in its dedicated Google Sheet.'}
+                    ? 'এই দোকানের বর্তমান ডেটা (পণ্য, পার্টি, বিক্রয়, ক্রয়, খরচ ও হিসাব) এর নিজস্ব Google Sheet-এ থাকা সর্বশেষ ব্যাকআপ দিয়ে প্রতিস্থাপন করা হবে।'
+                    : 'Current data for this shop (products, parties, sales, purchases, expenses, and accounts) will be replaced with the backup stored in its dedicated Google Sheet.'}
                 </p>
               </div>
             </div>

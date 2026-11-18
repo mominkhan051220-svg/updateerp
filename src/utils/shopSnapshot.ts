@@ -5,10 +5,12 @@ export function buildShopSnapshot(state: AppState, shopId: string): ShopDataSnap
   const shop = state.shops.find((s) => s.id === shopId);
   if (!shop) return null;
 
+  const { webhookUrl: _w, ...safeShop } = shop;
+
   return {
     version: 1,
     exportedAt: new Date().toISOString(),
-    shop,
+    shop: safeShop,
     products: state.products.filter((x) => x.shopId === shopId),
     stockMovements: state.stockMovements.filter((x) => x.shopId === shopId),
     parties: state.parties.filter((x) => x.shopId === shopId),
@@ -27,12 +29,26 @@ export function buildShopSnapshot(state: AppState, shopId: string): ShopDataSnap
   };
 }
 
-export function applyRestoredShopSnapshot(state: AppState, snapshot: ShopDataSnapshot): AppState {
+export function applyRestoredShopSnapshot(
+  state: AppState,
+  snapshot: ShopDataSnapshot,
+  expectedShopId?: string
+): AppState {
   const targetShopId = snapshot.shop.id;
-  const shopExists = state.shops.some((s) => s.id === targetShopId);
+  if (expectedShopId && targetShopId !== expectedShopId) {
+    throw new Error('Cross-shop restore blocked: Google Sheet belongs to a different shop.');
+  }
+
+  const existingShop = state.shops.find((s) => s.id === targetShopId);
+  const { webhookUrl: _w, ...restoredSafeShop } = snapshot.shop;
 
   const mergedShop = {
-    ...snapshot.shop,
+    ...restoredSafeShop,
+    hasWebhookUrl: existingShop?.hasWebhookUrl ?? restoredSafeShop.hasWebhookUrl,
+    maskedWebhookUrl: existingShop?.maskedWebhookUrl ?? restoredSafeShop.maskedWebhookUrl,
+    hasSheetSecret: existingShop?.hasSheetSecret ?? restoredSafeShop.hasSheetSecret,
+    maskedSheetSecret: existingShop?.maskedSheetSecret ?? restoredSafeShop.maskedSheetSecret,
+    pinProtected: existingShop?.pinProtected ?? restoredSafeShop.pinProtected,
     lastSyncStatus: 'synced' as const,
     lastSyncedAt: new Date().toISOString(),
     lastSyncMessage: 'Restored from Google Sheet',
@@ -40,7 +56,7 @@ export function applyRestoredShopSnapshot(state: AppState, snapshot: ShopDataSna
 
   return {
     ...state,
-    shops: shopExists
+    shops: existingShop
       ? state.shops.map((s) => (s.id === targetShopId ? mergedShop : s))
       : [...state.shops, mergedShop],
     products: [...state.products.filter((x) => x.shopId !== targetShopId), ...snapshot.products],

@@ -21,7 +21,7 @@ interface DashboardViewProps {
   onNavigate: (menu: MenuKey) => void;
 }
 
-const TODAY_ISO = '2026-11-16';
+const TODAY_ISO = new Date().toISOString().slice(0, 10);
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
   lang,
@@ -31,7 +31,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 }) => {
   const [filter, setFilter] = useState<TimeframeFilter>('month');
   const [customRange, setCustomRange] = useState<DateRange>({
-    start: '2026-11-01',
+    start: `${TODAY_ISO.slice(0, 8)}01`,
     end: TODAY_ISO,
   });
 

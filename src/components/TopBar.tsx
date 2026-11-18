@@ -52,7 +52,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const canSale = canAccessMenu(currentUser, 'sales');
   const canSettings = canAccessMenu(currentUser, 'settings');
   const isAdmin = currentUser.role === 'admin';
-  const hasSheetBound = Boolean(activeShop.spreadsheetId || activeShop.webhookUrl);
+  const hasSheetBound = Boolean(activeShop.spreadsheetId || activeShop.hasWebhookUrl);
 
   return (
     <header className="sticky top-0 z-30 h-16 bg-white border-b border-slate-200 px-2.5 sm:px-4 lg:px-6 flex items-center justify-between gap-1.5 sm:gap-4 no-print">
@@ -147,7 +147,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                     {lang === 'bn' ? 'গুগল শিট যুক্ত করুন' : 'Connect Google Sheets'}
                   </button>
                 ) : (
-                  <span>{lang === 'bn' ? 'লোকাল স্টোরেজ' : 'Local Mode'}</span>
+                  <span>{lang === 'bn' ? 'শিট সংযুক্ত নেই' : 'Sheet Pending'}</span>
                 )}
               </>
             )}

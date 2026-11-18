@@ -39,7 +39,6 @@ export interface UserAccount {
   id: string;
   name: string;
   username: string;
-  password: string;
   role: UserRole;
   assignedShopId: string;
   allowedShopIds: string[];
@@ -62,7 +61,12 @@ export interface Shop {
   name: string;
   phone: string;
   address: string;
-  webhookUrl: string;
+  webhookUrl?: string;
+  hasWebhookUrl?: boolean;
+  maskedWebhookUrl?: string;
+  hasSheetSecret?: boolean;
+  maskedSheetSecret?: string;
+  pinProtected?: boolean;
   spreadsheetId?: string;
   spreadsheetUrl?: string;
   lastSyncedAt?: string;

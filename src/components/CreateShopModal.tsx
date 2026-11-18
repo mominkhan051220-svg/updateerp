@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Cloud, Loader2, Plus, X } from 'lucide-react';
+import { Cloud, Loader2, Lock, Plus, X } from 'lucide-react';
 import { Language, Shop } from '../types';
 import { GoogleSignInButton } from './GoogleSignInButton';
 
@@ -7,8 +7,8 @@ interface CreateShopModalProps {
   lang: Language;
   googleConnected: boolean;
   googleEmail?: string | null;
-  onConnectGoogle: () => Promise<void>;
-  onCreateShop: (shop: Shop) => Promise<void>;
+  onConnectGoogle: () => Promise<string>;
+  onCreateShop: (shop: Shop, options?: { webhookUrl?: string; securityPin?: string }) => Promise<void>;
   onClose: () => void;
 }
 
@@ -23,8 +23,9 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
-  const [initialCapital, setInitialCapital] = useState('50000');
+  const [initialCapital, setInitialCapital] = useState('0');
   const [webhookUrl, setWebhookUrl] = useState('');
+  const [securityPin, setSecurityPin] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
 
@@ -32,6 +33,14 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
     e.preventDefault();
     if (!name.trim()) {
       setError(lang === 'bn' ? 'দোকানের নাম লিখুন।' : 'Please enter a shop name.');
+      return;
+    }
+    if (securityPin.trim() && securityPin.trim().length < 4) {
+      setError(
+        lang === 'bn'
+          ? 'দোকানের সিকিউরিটি পিন কমপক্ষে ৪ অক্ষরের হতে হবে।'
+          : 'Shop security PIN must be at least 4 characters.'
+      );
       return;
     }
 
@@ -48,9 +57,8 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
       const newShop: Shop = {
         id: `shop_${Date.now()}`,
         name: name.trim(),
-        phone: phone.trim() || '01700-000000',
-        address: address.trim() || 'Dhaka, Bangladesh',
-        webhookUrl: webhookUrl.trim(),
+        phone: phone.trim(),
+        address: address.trim(),
         lastSyncStatus: 'idle',
         printerFormat: 'thermal_80',
         initialCapital: Number(initialCapital) || 0,
@@ -64,7 +72,10 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
         createdAt: new Date().toISOString().slice(0, 10),
       };
 
-      await onCreateShop(newShop);
+      await onCreateShop(newShop, {
+        webhookUrl: webhookUrl.trim() || undefined,
+        securityPin: securityPin.trim() || undefined,
+      });
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create shop');
@@ -95,7 +106,7 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+        <form onSubmit={(e) => void handleSubmit(e)} className="p-5 space-y-4">
           <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-xs">
               <div className="font-semibold text-slate-900 flex items-center gap-1.5">
@@ -137,7 +148,7 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={lang === 'bn' ? 'যেমন: মদিনা ট্রেডার্স' : 'e.g., Madina Traders'}
+              placeholder={lang === 'bn' ? 'দোকানের নাম লিখুন' : 'Enter shop name'}
               className="w-full h-9 px-3 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
               required
             />
@@ -153,7 +164,7 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
                 type="text"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder="01711-000000"
+                placeholder="01XXXXXXXXX"
                 className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono"
               />
             </div>
@@ -186,20 +197,41 @@ export const CreateShopModal: React.FC<CreateShopModalProps> = ({
             />
           </div>
 
-          <div>
-            <label htmlFor="modal-shop-webhook" className="block text-xs font-medium text-slate-600 mb-1">
-              {lang === 'bn'
-                ? 'ঐচ্ছিক: Apps Script Webhook URL (ফাঁকা রাখতে পারেন)'
-                : 'Optional: Apps Script Webhook URL'}
-            </label>
-            <input
-              id="modal-shop-webhook"
-              type="text"
-              value={webhookUrl}
-              onChange={(e) => setWebhookUrl(e.target.value)}
-              placeholder="https://script.google.com/macros/s/.../exec"
-              className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="modal-shop-pin" className="block text-xs font-semibold text-slate-700 mb-1">
+                <span className="inline-flex items-center gap-1">
+                  <Lock className="w-3 h-3 text-emerald-600" />
+                  <span>{lang === 'bn' ? 'ঐচ্ছিক: দোকানের সিকিউরিটি পিন' : 'Optional: Shop Security PIN'}</span>
+                </span>
+              </label>
+              <input
+                id="modal-shop-pin"
+                type="password"
+                autoComplete="new-password"
+                value={securityPin}
+                onChange={(e) => setSecurityPin(e.target.value)}
+                placeholder={lang === 'bn' ? '৪+ অক্ষরের পিন' : '4+ char PIN'}
+                className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="modal-shop-webhook" className="block text-xs font-medium text-slate-600 mb-1">
+                {lang === 'bn'
+                  ? 'ঐচ্ছিক: Apps Script Webhook URL'
+                  : 'Optional: Apps Script Webhook URL'}
+              </label>
+              <input
+                id="modal-shop-webhook"
+                type="password"
+                autoComplete="off"
+                value={webhookUrl}
+                onChange={(e) => setWebhookUrl(e.target.value)}
+                placeholder="https://script.google.com/macros/s/..."
+                className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono"
+              />
+            </div>
           </div>
 
           {error && (

@@ -61,6 +61,12 @@ function chunkJsonString(json: string): string[][] {
   return chunks.length > 0 ? chunks : [['1', '{}']];
 }
 
+function sanitizeCell(val: string | number): string | number {
+  if (typeof val === 'number') return Number.isFinite(val) ? val : 0;
+  const str = String(val ?? '');
+  return /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
+}
+
 function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
   const snapshotJson = JSON.stringify(snapshot);
   const jsonChunks = chunkJsonString(snapshotJson);
@@ -79,11 +85,11 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       values: [
         ['ID', 'Name', 'Barcode', 'Category', 'Unit', 'PurchasePrice', 'SellingPrice', 'Stock'].slice(0, 7),
         ...snapshot.products.map((p) => [
-          p.id,
-          p.name,
-          p.barcode,
-          p.category,
-          `${p.stock} ${p.unit}`,
+          sanitizeCell(p.id),
+          sanitizeCell(p.name),
+          sanitizeCell(p.barcode),
+          sanitizeCell(p.category),
+          sanitizeCell(`${p.stock} ${p.unit}`),
           p.purchasePrice,
           p.sellingPrice,
         ]),
@@ -94,11 +100,11 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       values: [
         ['ID', 'Name', 'Type', 'Phone', 'Address', 'PrevDueOrAdv'],
         ...snapshot.parties.map((p) => [
-          p.id,
-          p.name,
-          p.type,
-          p.phone,
-          p.address,
+          sanitizeCell(p.id),
+          sanitizeCell(p.name),
+          sanitizeCell(p.type),
+          sanitizeCell(p.phone),
+          sanitizeCell(p.address),
           p.type === 'customer' ? p.previousDue : p.previousAdvance,
         ]),
       ],
@@ -108,13 +114,13 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       values: [
         ['InvoiceNo', 'Date', 'Customer', 'GrandTotal', 'Paid', 'Due', 'Status'],
         ...snapshot.sales.map((s) => [
-          s.invoiceNo,
-          s.date,
-          s.customerName,
+          sanitizeCell(s.invoiceNo),
+          sanitizeCell(s.date),
+          sanitizeCell(s.customerName),
           s.grandTotal,
           s.paidAmount,
           s.dueAmount,
-          s.status,
+          sanitizeCell(s.status),
         ]),
       ],
     },
@@ -123,9 +129,9 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       values: [
         ['BillNo', 'Date', 'Supplier', 'GrandTotal', 'Paid', 'Due'],
         ...snapshot.purchases.map((p) => [
-          p.billNo,
-          p.date,
-          p.supplierName,
+          sanitizeCell(p.billNo),
+          sanitizeCell(p.date),
+          sanitizeCell(p.supplierName),
           p.grandTotal,
           p.paidAmount,
           p.dueAmount,
@@ -136,42 +142,74 @@ function buildSheetValueRanges(snapshot: ShopDataSnapshot) {
       range: 'DueSettlements!A1:F' + Math.max(2, snapshot.dueSettlements.length + 1),
       values: [
         ['Date', 'PartyName', 'Type', 'Amount', 'Method', 'Note'],
-        ...snapshot.dueSettlements.map((d) => [d.date, d.partyName, d.partyType, d.amount, d.method, d.note]),
+        ...snapshot.dueSettlements.map((d) => [
+          sanitizeCell(d.date),
+          sanitizeCell(d.partyName),
+          sanitizeCell(d.partyType),
+          d.amount,
+          sanitizeCell(d.method),
+          sanitizeCell(d.note),
+        ]),
       ],
     },
     {
       range: 'Expenses!A1:E' + Math.max(2, snapshot.expenses.length + 1),
       values: [
         ['Date', 'Category', 'Amount', 'Method', 'Note'],
-        ...snapshot.expenses.map((e) => [e.date, e.category, e.amount, e.paymentMethod, e.note]),
+        ...snapshot.expenses.map((e) => [
+          sanitizeCell(e.date),
+          sanitizeCell(e.category),
+          e.amount,
+          sanitizeCell(e.paymentMethod),
+          sanitizeCell(e.note),
+        ]),
       ],
     },
     {
       range: 'BankTransactions!A1:F' + Math.max(2, snapshot.bankTransactions.length + 1),
       values: [
         ['Date', 'Account', 'Type', 'Amount', 'ReferenceID', 'Note'],
-        ...snapshot.bankTransactions.map((t) => [t.date, t.accountName, t.type, t.amount, t.referenceId, t.note]),
+        ...snapshot.bankTransactions.map((t) => [
+          sanitizeCell(t.date),
+          sanitizeCell(t.accountName),
+          sanitizeCell(t.type),
+          t.amount,
+          sanitizeCell(t.referenceId),
+          sanitizeCell(t.note),
+        ]),
       ],
     },
     {
       range: 'CashAdjustments!A1:D' + Math.max(2, snapshot.cashAdjustments.length + 1),
       values: [
         ['Date', 'Type', 'Amount', 'Note'],
-        ...snapshot.cashAdjustments.map((c) => [c.date, c.type, c.amount, c.note]),
+        ...snapshot.cashAdjustments.map((c) => [
+          sanitizeCell(c.date),
+          sanitizeCell(c.type),
+          c.amount,
+          sanitizeCell(c.note),
+        ]),
       ],
     },
     {
       range: 'Orders!A1:F' + Math.max(2, snapshot.salesOrders.length + snapshot.purchaseOrders.length + 1),
       values: [
         ['OrderNo', 'OrderType', 'Date', 'Party', 'Total', 'Status'],
-        ...snapshot.salesOrders.map((o) => [o.orderNo, 'SalesOrder', o.date, o.customerName, o.totalAmount, o.status]),
-        ...snapshot.purchaseOrders.map((o) => [
-          o.orderNo,
-          'PurchaseOrder',
-          o.date,
-          o.supplierName,
+        ...snapshot.salesOrders.map((o) => [
+          sanitizeCell(o.orderNo),
+          'SalesOrder',
+          sanitizeCell(o.date),
+          sanitizeCell(o.customerName),
           o.totalAmount,
-          o.status,
+          sanitizeCell(o.status),
+        ]),
+        ...snapshot.purchaseOrders.map((o) => [
+          sanitizeCell(o.orderNo),
+          'PurchaseOrder',
+          sanitizeCell(o.date),
+          sanitizeCell(o.supplierName),
+          o.totalAmount,
+          sanitizeCell(o.status),
         ]),
       ],
     },

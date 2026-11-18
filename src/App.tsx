@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Cloud, Loader2, Lock } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { UserAuthModal } from './components/UserAuthModal';
@@ -39,16 +40,15 @@ import {
   SalesOrder,
   Shop,
   UserAccount,
+  UserRole,
 } from './types';
 import {
-  applySaleStockDelta,
   canAccessMenu,
   computeShopHandCash,
   getAllowedMenusForUser,
   getAllowedShopsForUser,
 } from './utils/accounting';
 import { UI_TEXT } from './utils/i18n';
-import { syncRecordToGoogleSheet } from './utils/sheetSync';
 import {
   connectGoogleSheetsAccount,
   disconnectGoogleSheets,
@@ -61,46 +61,46 @@ import {
 } from './utils/googleSheetsApi';
 import { applyRestoredShopSnapshot, buildShopSnapshot } from './utils/shopSnapshot';
 
-const STORAGE_KEY = 'hishabkhata_pro_state_v1';
+const LANG_PREF_KEY = 'hishabkhata_lang';
 
-function loadInitialState(): AppState {
-  const seed = createSeedState();
-  const autostart =
-    typeof window !== 'undefined' &&
-    new URLSearchParams(window.location.search).get('autostart') === '1';
-
+function readSavedLanguage(): Language {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<AppState>;
-      if (parsed && Array.isArray(parsed.shops) && parsed.shops.length > 0 && Array.isArray(parsed.users)) {
-        const normalizedUsers = parsed.users.map((u) => ({
-          ...u,
-          assignedShopId: u.assignedShopId || u.allowedShopIds?.[0] || parsed.shops![0].id,
-          allowedShopIds:
-            u.allowedShopIds && u.allowedShopIds.length > 0
-              ? u.allowedShopIds
-              : [u.assignedShopId || parsed.shops![0].id],
-        }));
-
-        return {
-          ...seed,
-          ...parsed,
-          isAuthenticated: autostart ? true : Boolean(parsed.isAuthenticated),
-          users: normalizedUsers,
-          shops: parsed.shops,
-        };
-      }
-    }
+    const saved = localStorage.getItem(LANG_PREF_KEY);
+    return saved === 'en' ? 'en' : 'bn';
   } catch {
-    // Fallback to seed data
+    return 'bn';
   }
+}
 
-  return autostart ? { ...seed, isAuthenticated: true } : seed;
+async function apiJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(url, {
+    credentials: 'include',
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
+      ...(options?.headers ?? {}),
+    },
+  });
+
+  const data = (await res.json()) as T & { message?: string; status?: string };
+  if (!res.ok) {
+    throw new Error(data.message || `Request failed (${res.status})`);
+  }
+  return data;
 }
 
 export default function App() {
-  const [state, setState] = useState<AppState>(loadInitialState);
+  const [state, setState] = useState<AppState>(() => ({
+    ...createSeedState(),
+    language: readSavedLanguage(),
+  }));
+  const [authChecked, setAuthChecked] = useState(false);
+  const [unlockedShopIds, setUnlockedShopIds] = useState<string[]>([]);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [unlockingPin, setUnlockingPin] = useState(false);
+
   const [activeMenu, setActiveMenu] = useState<MenuKey>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [userModalOpen, setUserModalOpen] = useState(false);
@@ -110,13 +110,48 @@ export default function App() {
     message: string;
   } | null>(null);
 
-  // Google Sheets OAuth in-memory session (never stored in localStorage/sessionStorage)
+  // Google Sheets OAuth in-memory session (never persisted in browser storage)
   const [googleConnected, setGoogleConnected] = useState(false);
   const [googleEmail, setGoogleEmail] = useState<string | null>(null);
   const googleAccessTokenRef = useRef<string | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
-  const lastSnapshotHashRef = useRef<Record<string, string>>({});
+
+  // Verify authoritative server session on startup (never trust client localStorage for auth or data)
+  useEffect(() => {
+    let active = true;
+    const checkSession = async () => {
+      try {
+        if (window.location.pathname !== '/' || window.location.search) {
+          window.history.replaceState({}, '', '/');
+        }
+        const data = await apiJson<{
+          authenticated: boolean;
+          user?: UserAccount;
+          state?: AppState;
+          unlockedShopIds?: string[];
+        }>('/api/auth/session', { method: 'GET' });
+
+        if (!active) return;
+        if (data.authenticated && data.state) {
+          setState({ ...data.state, isAuthenticated: true });
+          setUnlockedShopIds(data.unlockedShopIds ?? []);
+        } else {
+          setState({ ...createSeedState(), language: readSavedLanguage(), isAuthenticated: false });
+          setUnlockedShopIds([]);
+        }
+      } catch {
+        if (!active) return;
+        setState({ ...createSeedState(), language: readSavedLanguage(), isAuthenticated: false });
+      } finally {
+        if (active) setAuthChecked(true);
+      }
+    };
+    void checkSession();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = initGoogleAuth(
@@ -133,14 +168,6 @@ export default function App() {
     );
     return unsubscribe;
   }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [state]);
 
   const currentUser = useMemo(
     () => state.users.find((u) => u.id === state.currentUserId) ?? state.users[0],
@@ -162,17 +189,9 @@ export default function App() {
     ? activeMenu
     : allowedMenus[0] ?? 'dashboard';
 
-  // Ensure staff activeShopId stays locked to assignedShopId even after permission edits
-  useEffect(() => {
-    if (
-      state.isAuthenticated &&
-      currentUser.role !== 'admin' &&
-      allowedShops.length > 0 &&
-      state.activeShopId !== allowedShops[0].id
-    ) {
-      setState((prev) => ({ ...prev, activeShopId: allowedShops[0].id }));
-    }
-  }, [state.isAuthenticated, currentUser.role, allowedShops, state.activeShopId]);
+  const isShopPinLocked = Boolean(
+    activeShop.pinProtected && !unlockedShopIds.includes(activeShop.id)
+  );
 
   const handleConnectGoogle = useCallback(async (): Promise<string> => {
     const { user, accessToken } = await connectGoogleSheetsAccount();
@@ -189,71 +208,80 @@ export default function App() {
     setGoogleEmail(null);
   }, []);
 
-  // Debounced real-time Google Sheets sync whenever the active shop's data changes
-  const activeShopDataSignature = useMemo(() => {
-    if (!activeShop.spreadsheetId) return '';
-    const snap = buildShopSnapshot(state, activeShop.id);
-    if (!snap) return '';
-    const { exportedAt: _e, shop, ...rest } = snap;
-    const { lastSyncedAt: _ls, lastSyncStatus: _lss, lastSyncMessage: _lsm, ...stableShop } = shop;
-    return JSON.stringify({ shop: stableShop, ...rest });
-  }, [state, activeShop.id, activeShop.spreadsheetId]);
-
-  useEffect(() => {
+  const pushOAuthSnapshotNow = useCallback(async (nextState: AppState, targetShopId: string) => {
     const token = googleAccessTokenRef.current;
-    if (!token || !activeShop.spreadsheetId || !activeShopDataSignature) return;
-    if (lastSnapshotHashRef.current[activeShop.id] === activeShopDataSignature) return;
+    const targetShop = nextState.shops.find((s) => s.id === targetShopId);
+    if (!token || !targetShop?.spreadsheetId) return false;
 
-    const timer = window.setTimeout(async () => {
-      const snap = buildShopSnapshot(stateRef.current, activeShop.id);
-      const latestToken = googleAccessTokenRef.current;
-      if (!snap || !snap.shop.spreadsheetId || !latestToken) return;
+    const snap = buildShopSnapshot(nextState, targetShopId);
+    if (!snap) return false;
 
-      lastSnapshotHashRef.current[activeShop.id] = activeShopDataSignature;
+    try {
+      const res = await syncShopToGoogleSheet(token, targetShop.spreadsheetId, snap);
+      const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+        method: 'POST',
+        body: JSON.stringify({
+          shopId: targetShopId,
+          lastSyncStatus: 'synced',
+          lastSyncedAt: res.updatedAt,
+          lastSyncMessage: 'Saved directly to Google Sheet',
+        }),
+      });
+      setState(statusRes.state);
+      setSyncFeedback({ status: 'synced', message: 'Saved directly to Google Sheet' });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Google Sheet sync error';
       try {
-        const res = await syncShopToGoogleSheet(latestToken, snap.shop.spreadsheetId, snap);
-        setState((prev) => ({
-          ...prev,
-          shops: prev.shops.map((s) =>
-            s.id === activeShop.id
-              ? {
-                  ...s,
-                  lastSyncStatus: 'synced',
-                  lastSyncedAt: res.updatedAt,
-                  lastSyncMessage: 'Synced to Google Sheet',
-                }
-              : s
-          ),
-        }));
-        setSyncFeedback({ status: 'synced', message: 'Synced to Google Sheet' });
+        const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+          method: 'POST',
+          body: JSON.stringify({
+            shopId: targetShopId,
+            lastSyncStatus: 'error',
+            lastSyncMessage: msg,
+          }),
+        });
+        setState(statusRes.state);
+      } catch {
+        // Ignore secondary status update failure
+      }
+      setSyncFeedback({ status: 'error', message: msg });
+      return false;
+    }
+  }, []);
+
+  const mutateShopOnServer = useCallback(
+    async (action: string, payload: Record<string, unknown>, targetShopId?: string) => {
+      const targetId = targetShopId ?? activeShop.id;
+      try {
+        const res = await apiJson<{
+          state: AppState;
+          sheetSync?: { status: 'synced' | 'local_only' | 'error'; message: string };
+        }>(`/api/shops/${encodeURIComponent(targetId)}/mutate`, {
+          method: 'POST',
+          body: JSON.stringify({ action, payload }),
+        });
+
+        setState(res.state);
+
+        // If OAuth Google Sheet is linked & connected, flush immediately (no temporary delay!)
+        const updatedShop = res.state.shops.find((s) => s.id === targetId);
+        if (updatedShop?.spreadsheetId && googleAccessTokenRef.current) {
+          await pushOAuthSnapshotNow(res.state, targetId);
+        } else if (res.sheetSync) {
+          setSyncFeedback(res.sheetSync);
+        }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Google Sheet sync error';
-        setState((prev) => ({
-          ...prev,
-          shops: prev.shops.map((s) =>
-            s.id === activeShop.id
-              ? { ...s, lastSyncStatus: 'error', lastSyncMessage: msg }
-              : s
-          ),
-        }));
+        const msg = err instanceof Error ? err.message : 'Save failed';
+        if (msg.toLowerCase().includes('authentication')) {
+          setState({ ...createSeedState(), language: stateRef.current.language, isAuthenticated: false });
+          return;
+        }
         setSyncFeedback({ status: 'error', message: msg });
       }
-    }, 650);
-
-    return () => window.clearTimeout(timer);
-  }, [activeShop.id, activeShop.spreadsheetId, activeShopDataSignature, googleConnected]);
-
-  const triggerSheetSync = async (collection: string, record: unknown, shopOverride?: Shop) => {
-    const targetShop = shopOverride ?? activeShop;
-    if (!targetShop.webhookUrl) {
-      if (targetShop.spreadsheetId && googleAccessTokenRef.current) {
-        setSyncFeedback({ status: 'synced', message: 'Real-time Google Sheet sync active' });
-      }
-      return;
-    }
-    const res = await syncRecordToGoogleSheet(targetShop, collection, 'upsert', record);
-    setSyncFeedback({ status: res.status, message: res.message });
-  };
+    },
+    [activeShop.id, pushOAuthSnapshotNow]
+  );
 
   // Shop-scoped slices
   const shopId = activeShop.id;
@@ -330,296 +358,224 @@ export default function App() {
   );
 
   // Handlers
-  const handleSelectShop = (nextShopId: string) => {
+  const handleSelectShop = async (nextShopId: string) => {
     if (currentUser.role !== 'admin') return;
-    setState((prev) => ({ ...prev, activeShopId: nextShopId }));
+    setPinInput('');
+    setPinError('');
+    try {
+      const res = await apiJson<{ state: AppState }>('/api/shops/select', {
+        method: 'POST',
+        body: JSON.stringify({ shopId: nextShopId }),
+      });
+      setState(res.state);
+    } catch {
+      // Ignore invalid selection
+    }
   };
 
   const handleChangeLang = (lang: Language) => {
+    try {
+      localStorage.setItem(LANG_PREF_KEY, lang);
+    } catch {
+      // Ignore storage errors
+    }
     setState((prev) => ({ ...prev, language: lang }));
+    if (stateRef.current.isAuthenticated) {
+      void apiJson<{ state: AppState }>('/api/preferences/language', {
+        method: 'POST',
+        body: JSON.stringify({ language: lang }),
+      }).catch(() => {});
+    }
   };
 
-  const applyAuthenticatedUser = (targetUser: UserAccount) => {
-    const userAllowedShops = getAllowedShopsForUser(targetUser, state.shops);
-    const nextShopId =
-      targetUser.role === 'admin'
-        ? userAllowedShops.some((s) => s.id === state.activeShopId)
-          ? state.activeShopId
-          : userAllowedShops[0]?.id ?? state.activeShopId
-        : userAllowedShops[0]?.id ?? targetUser.assignedShopId;
-
-    const nextMenus = getAllowedMenusForUser(targetUser);
-    const nextMenu = canAccessMenu(targetUser, 'dashboard')
+  const handleLoginSuccess = (payload: {
+    user: UserAccount;
+    state: AppState;
+    unlockedShopIds: string[];
+  }) => {
+    const nextMenus = getAllowedMenusForUser(payload.user);
+    const nextMenu = canAccessMenu(payload.user, 'dashboard')
       ? 'dashboard'
       : nextMenus[0] ?? 'dashboard';
     setActiveMenu(nextMenu);
-
-    setState((prev) => ({
-      ...prev,
-      isAuthenticated: true,
-      currentUserId: targetUser.id,
-      activeShopId: nextShopId,
-    }));
+    setUnlockedShopIds(payload.unlockedShopIds);
+    setPinInput('');
+    setPinError('');
+    setState({ ...payload.state, isAuthenticated: true });
   };
 
-  const handleLoginUser = (userId: string) => {
-    const targetUser = state.users.find((u) => u.id === userId);
-    if (!targetUser) return;
-    applyAuthenticatedUser(targetUser);
-  };
-
-  const handleLoginSuccess = (user: UserAccount) => {
-    applyAuthenticatedUser(user);
-  };
-
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setUserModalOpen(false);
     setMobileMenuOpen(false);
     setCreateShopOpen(false);
-    setState((prev) => ({ ...prev, isAuthenticated: false }));
+    setUnlockedShopIds([]);
+    setSyncFeedback(null);
+    try {
+      await apiJson('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors on logout
+    }
+    if (googleConnected) {
+      await handleDisconnectGoogle().catch(() => {});
+    }
+    setState({
+      ...createSeedState(),
+      language: readSavedLanguage(),
+      isAuthenticated: false,
+    });
+  };
+
+  const handleUnlockShopPin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPinError('');
+    setUnlockingPin(true);
+    try {
+      const res = await apiJson<{
+        unlocked: boolean;
+        unlockedShopIds: string[];
+        state: AppState;
+      }>(`/api/shops/${encodeURIComponent(activeShop.id)}/unlock`, {
+        method: 'POST',
+        body: JSON.stringify({ pin: pinInput }),
+      });
+      setPinInput('');
+      setUnlockedShopIds(res.unlockedShopIds);
+      setState(res.state);
+    } catch (err) {
+      setPinError(
+        err instanceof Error
+          ? err.message
+          : state.language === 'bn'
+          ? 'ভুল সিকিউরিটি পিন।'
+          : 'Invalid shop PIN.'
+      );
+    } finally {
+      setUnlockingPin(false);
+    }
   };
 
   const handleCreateSale = (sale: SaleInvoice) => {
-    setState((prev) => ({
-      ...prev,
-      sales: [sale, ...prev.sales],
-      products: applySaleStockDelta(prev.products, sale.items, 'deduct'),
-    }));
-    void triggerSheetSync('sales', sale);
+    void mutateShopOnServer('create_sale', { sale });
   };
 
   const handleQuickAddParty = (party: Party) => {
-    setState((prev) => ({
-      ...prev,
-      parties: [party, ...prev.parties],
-    }));
-    void triggerSheetSync('parties', party);
+    void mutateShopOnServer('quick_add_party', { party });
   };
 
   const handleCreateSaleReturn = (ret: SaleReturn) => {
-    setState((prev) => ({
-      ...prev,
-      saleReturns: [ret, ...prev.saleReturns],
-      products: applySaleStockDelta(prev.products, ret.items, 'restore'),
-    }));
-    void triggerSheetSync('saleReturns', ret);
+    void mutateShopOnServer('create_sale_return', { saleReturn: ret });
   };
 
   const handleCreatePurchase = (bill: PurchaseBill) => {
-    setState((prev) => ({
-      ...prev,
-      purchases: [bill, ...prev.purchases],
-      products: applySaleStockDelta(prev.products, bill.items, 'restore'),
-    }));
-    void triggerSheetSync('purchases', bill);
+    void mutateShopOnServer('create_purchase', { purchase: bill });
   };
 
   const handleCreatePurchaseReturn = (ret: PurchaseReturn) => {
-    setState((prev) => ({
-      ...prev,
-      purchaseReturns: [ret, ...prev.purchaseReturns],
-      products: applySaleStockDelta(prev.products, ret.items, 'deduct'),
-    }));
-    void triggerSheetSync('purchaseReturns', ret);
+    void mutateShopOnServer('create_purchase_return', { purchaseReturn: ret });
   };
 
   const handleCreateSalesOrder = (order: SalesOrder) => {
-    setState((prev) => ({ ...prev, salesOrders: [order, ...prev.salesOrders] }));
-    void triggerSheetSync('salesOrders', order);
+    void mutateShopOnServer('create_sales_order', { order });
   };
 
   const handleConvertSalesOrder = (orderId: string) => {
-    const ord = state.salesOrders.find((o) => o.id === orderId);
-    if (!ord) return;
-    const sale: SaleInvoice = {
-      id: `sale_${Date.now()}`,
-      shopId: ord.shopId,
-      invoiceNo: `INV-${new Date().getFullYear()}-${shopSales.length + 101}`,
-      date: new Date().toISOString().slice(0, 10),
-      customerId: ord.customerId || 'walk_in',
-      customerName: ord.customerName,
-      items: ord.items,
-      subtotal: ord.totalAmount,
-      discountPercent: 0,
-      discountAmount: 0,
-      vatPercent: 0,
-      vatAmount: 0,
-      grandTotal: ord.totalAmount,
-      paidAmount: ord.advancePayment,
-      dueAmount: Math.max(0, ord.totalAmount - ord.advancePayment),
-      paymentMethod: 'cash',
-      status: ord.advancePayment >= ord.totalAmount ? 'paid' : ord.advancePayment > 0 ? 'partial' : 'due',
-    };
-    setState((prev) => ({
-      ...prev,
-      salesOrders: prev.salesOrders.map((o) => (o.id === orderId ? { ...o, status: 'delivered' } : o)),
-      sales: [sale, ...prev.sales],
-      products: applySaleStockDelta(prev.products, sale.items, 'deduct'),
-    }));
-    void triggerSheetSync('sales', sale);
+    void mutateShopOnServer('convert_sales_order', { orderId });
   };
 
   const handleCreatePurchaseOrder = (order: PurchaseOrder) => {
-    setState((prev) => ({ ...prev, purchaseOrders: [order, ...prev.purchaseOrders] }));
-    void triggerSheetSync('purchaseOrders', order);
+    void mutateShopOnServer('create_purchase_order', { order });
   };
 
   const handleConvertPurchaseOrder = (orderId: string) => {
-    const ord = state.purchaseOrders.find((o) => o.id === orderId);
-    if (!ord) return;
-    const bill: PurchaseBill = {
-      id: `pur_${Date.now()}`,
-      shopId: ord.shopId,
-      billNo: `PUR-${new Date().getFullYear()}-${shopPurchases.length + 501}`,
-      date: new Date().toISOString().slice(0, 10),
-      supplierId: ord.supplierId,
-      supplierName: ord.supplierName,
-      items: ord.items,
-      grandTotal: ord.totalAmount,
-      paidAmount: ord.totalAmount,
-      dueAmount: 0,
-      paymentStatus: 'paid',
-    };
-    setState((prev) => ({
-      ...prev,
-      purchaseOrders: prev.purchaseOrders.map((o) => (o.id === orderId ? { ...o, status: 'received' } : o)),
-      purchases: [bill, ...prev.purchases],
-      products: applySaleStockDelta(prev.products, bill.items, 'restore'),
-    }));
-    void triggerSheetSync('purchases', bill);
+    void mutateShopOnServer('convert_purchase_order', { orderId });
   };
 
   const handleSettleDue = (settlement: DueSettlement) => {
-    setState((prev) => ({ ...prev, dueSettlements: [settlement, ...prev.dueSettlements] }));
-    void triggerSheetSync('dueSettlements', settlement);
+    void mutateShopOnServer('settle_due', { settlement });
   };
 
   const handleAddExpense = (expense: Expense) => {
-    setState((prev) => ({ ...prev, expenses: [expense, ...prev.expenses] }));
-    void triggerSheetSync('expenses', expense);
+    void mutateShopOnServer('add_expense', { expense });
   };
 
   const handleDeleteExpense = (id: string) => {
-    setState((prev) => ({ ...prev, expenses: prev.expenses.filter((e) => e.id !== id) }));
+    void mutateShopOnServer('delete_expense', { id });
   };
 
   const handleUpdateInitialCapital = (amount: number) => {
-    setState((prev) => ({
-      ...prev,
-      shops: prev.shops.map((s) => (s.id === shopId ? { ...s, initialCapital: amount } : s)),
-    }));
+    void mutateShopOnServer('update_initial_capital', { amount });
   };
 
   const handleAddAdjustment = (adj: CashAdjustment) => {
-    setState((prev) => ({ ...prev, cashAdjustments: [adj, ...prev.cashAdjustments] }));
-    void triggerSheetSync('cashAdjustments', adj);
+    void mutateShopOnServer('add_adjustment', { adjustment: adj });
   };
 
   const handleAddBankTx = (tx: BankTransaction) => {
-    setState((prev) => ({ ...prev, bankTransactions: [tx, ...prev.bankTransactions] }));
-    void triggerSheetSync('bankTransactions', tx);
+    void mutateShopOnServer('add_bank_tx', { tx });
   };
 
   const handleAddBankAccount = (acc: BankAccount) => {
-    setState((prev) => ({ ...prev, bankAccounts: [...prev.bankAccounts, acc] }));
-    void triggerSheetSync('bankAccounts', acc);
+    void mutateShopOnServer('add_bank_account', { account: acc });
   };
 
   const handleUpdateOnlineConfig = (config: OnlineShopConfig) => {
-    setState((prev) => ({
-      ...prev,
-      shops: prev.shops.map((s) => (s.id === shopId ? { ...s, onlineShop: config } : s)),
-    }));
+    void mutateShopOnServer('update_online_config', { config });
   };
 
   const handleToggleProductOnline = (productId: string) => {
-    setState((prev) => ({
-      ...prev,
-      products: prev.products.map((p) => (p.id === productId ? { ...p, onlineListed: !p.onlineListed } : p)),
-    }));
+    void mutateShopOnServer('toggle_product_online', { productId });
   };
 
   const handleUpdateOrderStatus = (orderId: string, status: OnlineOrder['status']) => {
-    setState((prev) => ({
-      ...prev,
-      onlineOrders: prev.onlineOrders.map((o) => (o.id === orderId ? { ...o, status } : o)),
-    }));
+    void mutateShopOnServer('update_order_status', { orderId, status });
   };
 
   const handleSaveProduct = (product: Product, isNew: boolean) => {
-    setState((prev) => ({
-      ...prev,
-      products: isNew
-        ? [product, ...prev.products]
-        : prev.products.map((p) => (p.id === product.id ? product : p)),
-    }));
-    void triggerSheetSync('products', product);
+    void mutateShopOnServer('save_product', { product, isNew });
   };
 
   const handleAdjustStock = (productId: string, type: 'in' | 'out', qty: number, reason: string) => {
-    const prod = state.products.find((p) => p.id === productId);
-    if (!prod) return;
-    const movement = {
-      id: `stk_${Date.now()}`,
-      shopId,
-      productId,
-      productName: prod.name,
-      type,
-      quantity: qty,
-      reason,
-      date: new Date().toISOString().slice(0, 10),
-    };
-    setState((prev) => ({
-      ...prev,
-      products: prev.products.map((p) =>
-        p.id === productId
-          ? { ...p, stock: type === 'in' ? p.stock + qty : Math.max(0, p.stock - qty) }
-          : p
-      ),
-      stockMovements: [movement, ...prev.stockMovements],
-    }));
-    void triggerSheetSync('stockMovements', movement);
+    void mutateShopOnServer('adjust_stock', { productId, type, qty, reason });
   };
 
-  const handleCreateShop = async (newShop: Shop) => {
-    const defaultBank: BankAccount = {
-      id: `bank_${Date.now()}`,
-      shopId: newShop.id,
-      name: 'Cash / Merchant bKash',
-      accountType: 'bkash',
-      accountNumber: newShop.phone,
-      openingBalance: 0,
-    };
-
-    const nextState: AppState = {
-      ...stateRef.current,
-      shops: [...stateRef.current.shops, newShop],
-      bankAccounts: [...stateRef.current.bankAccounts, defaultBank],
-      activeShopId: newShop.id,
-    };
-    setState(nextState);
+  const handleCreateShop = async (
+    newShop: Shop,
+    options?: { webhookUrl?: string; securityPin?: string }
+  ) => {
+    const res = await apiJson<{
+      state: AppState;
+      unlockedShopIds: string[];
+      shopId: string;
+    }>('/api/shops', {
+      method: 'POST',
+      body: JSON.stringify({
+        shop: newShop,
+        webhookUrl: options?.webhookUrl,
+        securityPin: options?.securityPin,
+      }),
+    });
+    setState(res.state);
+    setUnlockedShopIds(res.unlockedShopIds ?? []);
 
     const token = googleAccessTokenRef.current;
     if (token) {
-      const snapshot = buildShopSnapshot(nextState, newShop.id);
+      const createdShop = res.state.shops.find((s) => s.id === res.shopId) ?? newShop;
+      const snapshot = buildShopSnapshot(res.state, res.shopId);
       if (snapshot) {
-        const created = await createShopSpreadsheet(token, newShop, snapshot);
+        const created = await createShopSpreadsheet(token, createdShop, snapshot);
         const nowIso = new Date().toISOString();
-        setState((prev) => ({
-          ...prev,
-          shops: prev.shops.map((s) =>
-            s.id === newShop.id
-              ? {
-                  ...s,
-                  spreadsheetId: created.spreadsheetId,
-                  spreadsheetUrl: created.spreadsheetUrl,
-                  lastSyncStatus: 'synced',
-                  lastSyncedAt: nowIso,
-                  lastSyncMessage: 'Auto-created Google Sheet',
-                }
-              : s
-          ),
-        }));
+        const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+          method: 'POST',
+          body: JSON.stringify({
+            shopId: res.shopId,
+            spreadsheetId: created.spreadsheetId,
+            spreadsheetUrl: created.spreadsheetUrl,
+            lastSyncStatus: 'synced',
+            lastSyncedAt: nowIso,
+            lastSyncMessage: 'Auto-created Google Sheet',
+          }),
+        });
+        setState(statusRes.state);
       }
     }
   };
@@ -630,129 +586,204 @@ export default function App() {
     if (!snapshot) throw new Error('Shop not found');
     const created = await createShopSpreadsheet(token, targetShop, snapshot);
     const nowIso = new Date().toISOString();
-    setState((prev) => ({
-      ...prev,
-      shops: prev.shops.map((s) =>
-        s.id === targetShop.id
-          ? {
-              ...s,
-              spreadsheetId: created.spreadsheetId,
-              spreadsheetUrl: created.spreadsheetUrl,
-              lastSyncStatus: 'synced',
-              lastSyncedAt: nowIso,
-              lastSyncMessage: 'Google Sheet created & synced',
-            }
-          : s
-      ),
-    }));
+    const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+      method: 'POST',
+      body: JSON.stringify({
+        shopId: targetShop.id,
+        spreadsheetId: created.spreadsheetId,
+        spreadsheetUrl: created.spreadsheetUrl,
+        lastSyncStatus: 'synced',
+        lastSyncedAt: nowIso,
+        lastSyncMessage: 'Google Sheet created & synced',
+      }),
+    });
+    setState(statusRes.state);
+    setSyncFeedback({ status: 'synced', message: 'Google Sheet created & synced' });
   };
 
-  const handleUpdateShop = (updated: Shop) => {
-    setState((prev) => ({
-      ...prev,
-      shops: prev.shops.map((s) => (s.id === updated.id ? updated : s)),
-    }));
+  const handleUpdateShop = async (updated: Shop) => {
+    await mutateShopOnServer('update_shop', { shop: updated }, updated.id);
   };
 
-  const handleCreateUser = (newUser: UserAccount) => {
-    setState((prev) => ({ ...prev, users: [...prev.users, newUser] }));
+  const handleUpdateShopSecurity = async (
+    targetShopId: string,
+    updates: {
+      webhookUrl?: string;
+      clearWebhook?: boolean;
+      rotateSecret?: boolean;
+      securityPin?: string;
+      removePin?: boolean;
+    }
+  ) => {
+    const res = await apiJson<{ state: AppState; rotatedSecretOnce?: string }>(
+      `/api/shops/${encodeURIComponent(targetShopId)}/security`,
+      {
+        method: 'POST',
+        body: JSON.stringify(updates),
+      }
+    );
+    setState(res.state);
+    return { rotatedSecretOnce: res.rotatedSecretOnce };
   };
 
-  const handleUpdateUserPermissions = (
+  const handleCreateUser = async (payload: {
+    name: string;
+    username: string;
+    password: string;
+    role: UserRole;
+    assignedShopId: string;
+    permissions: Record<MenuKey, boolean>;
+  }) => {
+    const res = await apiJson<{ state: AppState }>('/api/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    setState(res.state);
+  };
+
+  const handleUpdateUserPermissions = async (
     userId: string,
     permissions: Record<MenuKey, boolean>,
-    allowedShopIds: string[],
+    _allowedShopIds: string[],
     assignedShopId?: string
   ) => {
-    setState((prev) => ({
-      ...prev,
-      users: prev.users.map((u) =>
-        u.id === userId
-          ? {
-              ...u,
-              permissions,
-              allowedShopIds,
-              assignedShopId: assignedShopId ?? u.assignedShopId,
-            }
-          : u
-      ),
-    }));
+    const res = await apiJson<{ state: AppState }>(
+      `/api/users/${encodeURIComponent(userId)}/permissions`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ permissions, assignedShopId }),
+      }
+    );
+    setState(res.state);
+  };
+
+  const handleDeleteUser = async (userId: string) => {
+    const res = await apiJson<{ deletedSelf?: boolean; state?: AppState }>(
+      `/api/users/${encodeURIComponent(userId)}`,
+      { method: 'DELETE' }
+    );
+    if (res.deletedSelf) {
+      setUserModalOpen(false);
+      setMobileMenuOpen(false);
+      setCreateShopOpen(false);
+      setUnlockedShopIds([]);
+      setSyncFeedback(null);
+      if (googleConnected) {
+        await handleDisconnectGoogle().catch(() => {});
+      }
+      setState({
+        ...createSeedState(),
+        language: readSavedLanguage(),
+        isAuthenticated: false,
+      });
+      return;
+    }
+    if (res.state) {
+      setState(res.state);
+    }
   };
 
   const handleSyncShopNow = async (targetShop: Shop) => {
     const snapshot = buildShopSnapshot(stateRef.current, targetShop.id);
     if (!snapshot) return;
 
+    let syncedAny = false;
     const token = googleAccessTokenRef.current;
-    if (token && targetShop.spreadsheetId) {
-      const res = await syncShopToGoogleSheet(token, targetShop.spreadsheetId, snapshot);
-      setState((prev) => ({
-        ...prev,
-        shops: prev.shops.map((s) =>
-          s.id === targetShop.id
-            ? {
-                ...s,
-                lastSyncStatus: 'synced',
-                lastSyncedAt: res.updatedAt,
-                lastSyncMessage: 'Manual sync completed',
-              }
-            : s
-        ),
-      }));
-      setSyncFeedback({ status: 'synced', message: 'Synced to Google Sheet' });
-    }
 
-    if (targetShop.webhookUrl) {
-      await triggerSheetSync('full_snapshot', snapshot, targetShop);
-    }
-
-    if (!token && !targetShop.webhookUrl && targetShop.spreadsheetId) {
-      const freshToken = await handleConnectGoogle();
+    if (targetShop.spreadsheetId) {
+      const freshToken = token ?? (await handleConnectGoogle());
       const res = await syncShopToGoogleSheet(freshToken, targetShop.spreadsheetId, snapshot);
-      setState((prev) => ({
-        ...prev,
-        shops: prev.shops.map((s) =>
-          s.id === targetShop.id
-            ? {
-                ...s,
-                lastSyncStatus: 'synced',
-                lastSyncedAt: res.updatedAt,
-                lastSyncMessage: 'Synced to Google Sheet',
-              }
-            : s
-        ),
-      }));
+      const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+        method: 'POST',
+        body: JSON.stringify({
+          shopId: targetShop.id,
+          lastSyncStatus: 'synced',
+          lastSyncedAt: res.updatedAt,
+          lastSyncMessage: 'Manual sync completed',
+        }),
+      });
+      setState(statusRes.state);
+      syncedAny = true;
     }
+
+    if (targetShop.hasWebhookUrl) {
+      const res = await apiJson<{ state: AppState }>('/api/sheets/sync', {
+        method: 'POST',
+        body: JSON.stringify({
+          shopId: targetShop.id,
+          action: 'save_snapshot',
+          collection: 'ShopSnapshot',
+          fullSnapshot: snapshot,
+        }),
+      });
+      setState(res.state);
+      syncedAny = true;
+    }
+
+    if (!syncedAny) {
+      throw new Error(
+        state.language === 'bn'
+          ? 'প্রথমে এই দোকানের জন্য Google Sheet যুক্ত করুন বা Webhook URL সেভ করুন।'
+          : 'Please create a Google Sheet or bind a Webhook URL for this shop first.'
+      );
+    }
+
+    setSyncFeedback({ status: 'synced', message: 'Synced to Google Sheet' });
   };
 
   const handleRestoreShopFromSheet = async (targetShop: Shop) => {
-    if (!targetShop.spreadsheetId) {
-      throw new Error('No Google Sheet is linked to this shop yet.');
+    if (targetShop.spreadsheetId) {
+      const token = googleAccessTokenRef.current ?? (await handleConnectGoogle());
+      const snapshot = await restoreShopFromGoogleSheet(token, targetShop.spreadsheetId);
+      const validated = applyRestoredShopSnapshot(stateRef.current, snapshot, targetShop.id);
+      void validated;
+      await mutateShopOnServer('restore_snapshot', { snapshot }, targetShop.id);
+      setSyncFeedback({ status: 'synced', message: `Restored ${targetShop.name} from Google Sheet` });
+      return;
     }
-    const token = googleAccessTokenRef.current ?? (await handleConnectGoogle());
-    const snapshot = await restoreShopFromGoogleSheet(token, targetShop.spreadsheetId);
-    setState((prev) => applyRestoredShopSnapshot(prev, snapshot));
-    setSyncFeedback({ status: 'synced', message: `Restored ${targetShop.name} from Google Sheet` });
+
+    if (targetShop.hasWebhookUrl) {
+      const res = await apiJson<{ state: AppState }>('/api/sheets/restore', {
+        method: 'POST',
+        body: JSON.stringify({ shopId: targetShop.id }),
+      });
+      setState(res.state);
+      setSyncFeedback({ status: 'synced', message: `Restored ${targetShop.name} from Google Sheet` });
+      return;
+    }
+
+    throw new Error('No Google Sheet or Webhook is linked to this shop yet.');
   };
 
-  const handleResetAllData = () => {
-    const fresh = { ...createSeedState(), isAuthenticated: true };
-    setState(fresh);
+  const handleResetAllData = async () => {
+    const res = await apiJson<{ state: AppState }>('/api/reset', { method: 'POST' });
+    setState(res.state);
+    setUnlockedShopIds([]);
     setActiveMenu('dashboard');
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
   };
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="flex items-center gap-2.5 text-sm font-semibold text-slate-600">
+          <Loader2 className="w-5 h-5 animate-spin text-emerald-600" />
+          <span>{state.language === 'bn' ? 'সিকিউরিটি যাচাই হচ্ছে...' : 'Verifying session...'}</span>
+        </div>
+      </div>
+    );
+  }
 
   if (!state.isAuthenticated) {
     return (
       <LoginPage
         lang={state.language}
         onChangeLang={handleChangeLang}
-        users={state.users}
-        shops={state.shops}
         onLoginSuccess={handleLoginSuccess}
       />
     );
   }
+
+  const hasSheetConnected = Boolean(activeShop.spreadsheetId || activeShop.hasWebhookUrl);
 
   return (
     <div className="min-h-screen flex bg-slate-50 text-slate-900">
@@ -764,7 +795,7 @@ export default function App() {
         shopName={activeShop.name}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
-        onLogout={handleLogout}
+        onLogout={() => void handleLogout()}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -773,7 +804,7 @@ export default function App() {
           onChangeLang={handleChangeLang}
           shops={allowedShops}
           activeShop={activeShop}
-          onSelectShop={handleSelectShop}
+          onSelectShop={(id) => void handleSelectShop(id)}
           currentUser={currentUser}
           activeMenu={effectiveMenu}
           onNavigate={(menu) => {
@@ -784,7 +815,7 @@ export default function App() {
           onOpenUserModal={() => setUserModalOpen(true)}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
           onOpenCreateShop={() => setCreateShopOpen(true)}
-          onLogout={handleLogout}
+          onLogout={() => void handleLogout()}
           googleConnected={googleConnected}
           onConnectGoogle={async () => {
             await handleConnectGoogle();
@@ -792,8 +823,74 @@ export default function App() {
           syncFeedback={syncFeedback}
         />
 
-        <main className="flex-1 p-4 lg:p-6 max-w-[1440px] w-full mx-auto">
-          {!canAccessMenu(currentUser, effectiveMenu) ? (
+        <main className="flex-1 p-4 lg:p-6 max-w-[1440px] w-full mx-auto space-y-4">
+          {!hasSheetConnected && !isShopPinLocked && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 no-print">
+              <div className="flex items-center gap-2 text-xs text-amber-900 font-medium">
+                <Cloud className="w-4 h-4 text-amber-700 shrink-0" />
+                <span>
+                  {state.language === 'bn'
+                    ? `"${activeShop.name}"-এ সরাসরি Google Sheet ডাটাবেজ সংযুক্ত করতে Google Sheet তৈরি বা Webhook URL যুক্ত করুন।`
+                    : `Link a dedicated Google Sheet or Webhook to "${activeShop.name}" so every input saves directly to Google Sheets.`}
+                </span>
+              </div>
+              {currentUser.role === 'admin' && (
+                <button
+                  type="button"
+                  onClick={() => void handleCreateSheetForShop(activeShop)}
+                  className="h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+                >
+                  {state.language === 'bn' ? 'গুগল শিট তৈরি ও যুক্ত করুন' : 'Create & Link Google Sheet'}
+                </button>
+              )}
+            </div>
+          )}
+
+          {isShopPinLocked ? (
+            <div className="max-w-sm mx-auto mt-10 bg-white border border-slate-200 rounded-xl p-6 space-y-4 shadow-xs">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-lg bg-indigo-50 text-indigo-700 flex items-center justify-center">
+                  <Lock className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">{activeShop.name}</h2>
+                  <p className="text-xs text-slate-500">
+                    {state.language === 'bn'
+                      ? 'এই দোকানের নিজস্ব সিকিউরিটি পিন দিয়ে আনলক করুন'
+                      : 'Enter this shop’s individual security PIN to unlock'}
+                  </p>
+                </div>
+              </div>
+              <form onSubmit={(e) => void handleUnlockShopPin(e)} className="space-y-3">
+                <input
+                  type="password"
+                  aria-label={state.language === 'bn' ? 'দোকানের সিকিউরিটি পিন' : 'Shop Security PIN'}
+                  value={pinInput}
+                  onChange={(e) => {
+                    setPinInput(e.target.value);
+                    setPinError('');
+                  }}
+                  placeholder="••••"
+                  className="w-full h-10 px-3 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  required
+                />
+                {pinError && <p className="text-xs text-red-600 font-medium">{pinError}</p>}
+                <button
+                  type="submit"
+                  disabled={unlockingPin}
+                  className="w-full h-10 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold disabled:opacity-60"
+                >
+                  {unlockingPin
+                    ? state.language === 'bn'
+                      ? 'যাচাই হচ্ছে...'
+                      : 'Verifying...'
+                    : state.language === 'bn'
+                    ? 'দোকান আনলক করুন'
+                    : 'Unlock Shop'}
+                </button>
+              </form>
+            </div>
+          ) : !canAccessMenu(currentUser, effectiveMenu) ? (
             <div className="bg-white border border-red-200 rounded-xl p-8 text-center text-sm text-red-700 font-medium">
               {UI_TEXT.accessDenied[state.language]}
             </div>
@@ -954,18 +1051,19 @@ export default function App() {
                   shops={state.shops}
                   activeShop={activeShop}
                   users={state.users}
+                  currentUserId={currentUser.id}
                   googleConnected={googleConnected}
                   googleEmail={googleEmail}
-                  onConnectGoogle={async () => {
-                    await handleConnectGoogle();
-                  }}
+                  onConnectGoogle={handleConnectGoogle}
                   onDisconnectGoogle={handleDisconnectGoogle}
                   onCreateShop={handleCreateShop}
                   onUpdateShop={handleUpdateShop}
+                  onUpdateShopSecurity={handleUpdateShopSecurity}
                   onCreateSheetForShop={handleCreateSheetForShop}
                   onRestoreShopFromSheet={handleRestoreShopFromSheet}
                   onCreateUser={handleCreateUser}
                   onUpdateUserPermissions={handleUpdateUserPermissions}
+                  onDeleteUser={handleDeleteUser}
                   onSyncShopNow={handleSyncShopNow}
                   onResetAllData={handleResetAllData}
                 />
@@ -978,10 +1076,9 @@ export default function App() {
       {userModalOpen && (
         <UserAuthModal
           lang={state.language}
-          users={state.users}
           shops={state.shops}
           currentUser={currentUser}
-          onLoginUser={handleLoginUser}
+          onLoginSuccess={handleLoginSuccess}
           onLogout={handleLogout}
           onClose={() => setUserModalOpen(false)}
         />
@@ -992,9 +1089,7 @@ export default function App() {
           lang={state.language}
           googleConnected={googleConnected}
           googleEmail={googleEmail}
-          onConnectGoogle={async () => {
-            await handleConnectGoogle();
-          }}
+          onConnectGoogle={handleConnectGoogle}
           onCreateShop={handleCreateShop}
           onClose={() => setCreateShopOpen(false)}
         />
@@ -1002,4 +1097,3 @@ export default function App() {
     </div>
   );
 }
-
