@@ -50,7 +50,10 @@ import {
 } from './utils/accounting';
 import { UI_TEXT } from './utils/i18n';
 import {
+  canUseSameOriginRedirect,
   connectGoogleSheetsAccount,
+  consumeGoogleRedirectResult,
+  consumePendingRedirectShopId,
   disconnectGoogleSheets,
   initGoogleAuth,
 } from './utils/googleAuth';
@@ -119,10 +122,19 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Verify authoritative server session on startup (never trust client localStorage for auth or data)
+  // Verify authoritative server session + consume any pending Google OAuth redirect result on startup
   useEffect(() => {
     let active = true;
     const checkSession = async () => {
+      const savedLang = readSavedLanguage();
+      let redirectAuth: { user: { email: string | null }; accessToken: string } | null = null;
+      let redirectErrorMsg = '';
+      try {
+        redirectAuth = await consumeGoogleRedirectResult(savedLang);
+      } catch (err) {
+        redirectErrorMsg = err instanceof Error ? err.message : 'Google sign-in failed.';
+      }
+
       try {
         if (window.location.pathname !== '/' || window.location.search) {
           window.history.replaceState({}, '', '/');
@@ -136,15 +148,79 @@ export default function App() {
 
         if (!active) return;
         if (data.authenticated && data.state) {
-          setState({ ...data.state, isAuthenticated: true });
+          let nextState: AppState = { ...data.state, isAuthenticated: true };
           setUnlockedShopIds(data.unlockedShopIds ?? []);
+
+          if (redirectAuth) {
+            googleAccessTokenRef.current = redirectAuth.accessToken;
+            setGoogleConnected(true);
+            setGoogleEmail(redirectAuth.user.email);
+
+            const pendingShopId = consumePendingRedirectShopId();
+            const pendingShop = pendingShopId
+              ? nextState.shops.find((s) => s.id === pendingShopId)
+              : undefined;
+            if (pendingShop && !pendingShop.spreadsheetId) {
+              const snapshot = buildShopSnapshot(nextState, pendingShop.id);
+              if (snapshot) {
+                try {
+                  const created = await createShopSpreadsheet(
+                    redirectAuth.accessToken,
+                    pendingShop,
+                    snapshot,
+                    nextState.language
+                  );
+                  const nowIso = new Date().toISOString();
+                  const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      shopId: pendingShop.id,
+                      spreadsheetId: created.spreadsheetId,
+                      spreadsheetUrl: created.spreadsheetUrl,
+                      lastSyncStatus: 'synced',
+                      lastSyncedAt: nowIso,
+                      lastSyncMessage: 'Google Sheet created & synced',
+                    }),
+                  });
+                  nextState = { ...statusRes.state, isAuthenticated: true };
+                  setSyncFeedback({
+                    status: 'synced',
+                    message:
+                      nextState.language === 'bn'
+                        ? `"${pendingShop.name}"-এর জন্য নতুন Google Sheet তৈরি হয়ে যুক্ত হয়েছে।`
+                        : `Google Sheet created and linked to "${pendingShop.name}".`,
+                  });
+                } catch (sheetErr) {
+                  setSyncFeedback({
+                    status: 'error',
+                    message:
+                      sheetErr instanceof Error
+                        ? sheetErr.message
+                        : 'Failed to create Google Sheet.',
+                  });
+                }
+              }
+            } else {
+              setSyncFeedback({
+                status: 'synced',
+                message:
+                  nextState.language === 'bn'
+                    ? `গুগল অ্যাকাউন্ট যুক্ত হয়েছে (${redirectAuth.user.email || 'Connected'})`
+                    : `Google connected (${redirectAuth.user.email || 'Active'})`,
+              });
+            }
+          } else if (redirectErrorMsg) {
+            setSyncFeedback({ status: 'error', message: redirectErrorMsg });
+          }
+
+          setState(nextState);
         } else {
-          setState({ ...createSeedState(), language: readSavedLanguage(), isAuthenticated: false });
+          setState({ ...createSeedState(), language: savedLang, isAuthenticated: false });
           setUnlockedShopIds([]);
         }
       } catch {
         if (!active) return;
-        setState({ ...createSeedState(), language: readSavedLanguage(), isAuthenticated: false });
+        setState({ ...createSeedState(), language: savedLang, isAuthenticated: false });
       } finally {
         if (active) setAuthChecked(true);
       }
@@ -195,14 +271,24 @@ export default function App() {
     activeShop.pinProtected && !unlockedShopIds.includes(activeShop.id)
   );
 
-  const handleConnectGoogle = useCallback(async (): Promise<string> => {
-    const { user, accessToken } = await connectGoogleSheetsAccount(stateRef.current.language);
-    googleAccessTokenRef.current = accessToken;
-    setGoogleConnected(true);
-    setGoogleEmail(user.email);
-    setSyncFeedback(null);
-    return accessToken;
-  }, []);
+  const handleConnectGoogle = useCallback(
+    async (options?: {
+      pendingShopId?: string;
+      forcePopup?: boolean;
+      forceRedirect?: boolean;
+    }): Promise<string | null> => {
+      const res = await connectGoogleSheetsAccount(stateRef.current.language, options);
+      if (res.redirected) {
+        return null;
+      }
+      googleAccessTokenRef.current = res.accessToken;
+      setGoogleConnected(true);
+      setGoogleEmail(res.user.email);
+      setSyncFeedback(null);
+      return res.accessToken;
+    },
+    []
+  );
 
   const handleDisconnectGoogle = useCallback(async () => {
     await disconnectGoogleSheets();
@@ -584,7 +670,11 @@ export default function App() {
   };
 
   const handleCreateSheetForShop = async (targetShop: Shop) => {
-    const token = googleAccessTokenRef.current ?? (await handleConnectGoogle());
+    const token =
+      googleAccessTokenRef.current ??
+      (await handleConnectGoogle({ pendingShopId: targetShop.id }));
+    if (!token) return;
+
     const snapshot = buildShopSnapshot(stateRef.current, targetShop.id);
     if (!snapshot) throw new Error('Shop not found');
     const lang = stateRef.current.language;
@@ -710,7 +800,13 @@ export default function App() {
 
     if (targetShop.spreadsheetId) {
       const freshToken = token ?? (await handleConnectGoogle());
-      const res = await syncShopToGoogleSheet(freshToken, targetShop.spreadsheetId, snapshot);
+      if (!freshToken) return;
+      const res = await syncShopToGoogleSheet(
+        freshToken,
+        targetShop.spreadsheetId,
+        snapshot,
+        stateRef.current.language
+      );
       const statusRes = await apiJson<{ state: AppState }>('/api/sheets/sync-status', {
         method: 'POST',
         body: JSON.stringify({
@@ -752,7 +848,12 @@ export default function App() {
   const handleRestoreShopFromSheet = async (targetShop: Shop) => {
     if (targetShop.spreadsheetId) {
       const token = googleAccessTokenRef.current ?? (await handleConnectGoogle());
-      const snapshot = await restoreShopFromGoogleSheet(token, targetShop.spreadsheetId);
+      if (!token) return;
+      const snapshot = await restoreShopFromGoogleSheet(
+        token,
+        targetShop.spreadsheetId,
+        stateRef.current.language
+      );
       const validated = applyRestoredShopSnapshot(stateRef.current, snapshot, targetShop.id);
       void validated;
       await mutateShopOnServer('restore_snapshot', { snapshot }, targetShop.id);
@@ -837,8 +938,8 @@ export default function App() {
           googleConnected={googleConnected}
           onConnectGoogle={async () => {
             try {
-              await handleConnectGoogle();
-              if (!activeShop.spreadsheetId) {
+              const token = await handleConnectGoogle({ pendingShopId: activeShop.id });
+              if (token && !activeShop.spreadsheetId) {
                 await handleCreateSheetForShop(activeShop);
               }
             } catch (err) {
@@ -857,9 +958,33 @@ export default function App() {
               role="alert"
               className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start justify-between gap-3 no-print"
             >
-              <div className="flex items-start gap-2 text-xs text-red-800 font-medium">
-                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                <span className="leading-relaxed break-all">{syncFeedback.message}</span>
+              <div className="space-y-2 text-xs text-red-800 font-medium min-w-0">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  <span className="leading-relaxed break-all">{syncFeedback.message}</span>
+                </div>
+                {canUseSameOriginRedirect() && !googleConnected && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleConnectGoogle({
+                        pendingShopId: activeShop.id,
+                        forceRedirect: true,
+                      }).catch((err) =>
+                        setSyncFeedback({
+                          status: 'error',
+                          message:
+                            err instanceof Error ? err.message : 'Redirect sign-in failed',
+                        })
+                      )
+                    }
+                    className="h-8 px-3 rounded-lg bg-red-700 hover:bg-red-800 text-white text-xs font-semibold"
+                  >
+                    {state.language === 'bn'
+                      ? 'Redirect দিয়ে যুক্ত করুন (মোবাইল বান্ধব)'
+                      : 'Connect via Redirect (Mobile Friendly)'}
+                  </button>
+                )}
               </div>
               <button
                 type="button"
@@ -1145,7 +1270,13 @@ export default function App() {
                   currentUserId={currentUser.id}
                   googleConnected={googleConnected}
                   googleEmail={googleEmail}
-                  onConnectGoogle={handleConnectGoogle}
+                  canUseRedirect={canUseSameOriginRedirect()}
+                  onConnectGoogle={(opts) =>
+                    handleConnectGoogle({
+                      pendingShopId: activeShop.id,
+                      forceRedirect: opts?.forceRedirect,
+                    })
+                  }
                   onDisconnectGoogle={handleDisconnectGoogle}
                   onCreateShop={handleCreateShop}
                   onUpdateShop={handleUpdateShop}

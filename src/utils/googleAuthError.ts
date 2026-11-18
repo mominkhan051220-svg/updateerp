@@ -34,8 +34,8 @@ export function formatGoogleAuthError(
     rawMessage.includes('popup-closed-by-user')
   ) {
     return lang === 'bn'
-      ? `গুগল সাইন-ইন সম্পন্ন হওয়ার আগেই উইন্ডো বন্ধ হয়ে গেছে। ডোমেইনটি (${host}) Firebase Authorized Domains-এ যুক্ত আছে কি না যাচাই করুন এবং পপ-আপ Allow করে আবার চেষ্টা করুন।`
-      : `Google sign-in window closed before completing. Verify "${host}" is in Firebase Authorized Domains and popups are allowed, then try again.`;
+      ? `গুগল সাইন-ইন পপ-আপ (${host}) সম্পন্ন হওয়ার আগেই বন্ধ হয়ে গেছে। মোবাইল ব্রাউজারে পপ-আপ কাজ না করলে নিচের "Redirect দিয়ে যুক্ত করুন" অপশনটি ব্যবহার করুন অথবা পপ-আপ Allow করে আবার চেষ্টা করুন।`
+      : `Google sign-in popup closed before completing on "${host}". On mobile browsers, use the Redirect sign-in option or allow popups and try again.`;
   }
 
   if (

@@ -22,7 +22,7 @@ test('formats popup-closed-by-user and popup-blocked clearly', () => {
 
   assert.match(
     formatGoogleAuthError(closedErr, 'bn', 'hishabkhatapro.pages.dev'),
-    /Authorized Domains/
+    /Redirect/
   );
   assert.match(formatGoogleAuthError(blockedErr, 'en', 'hishabkhatapro.pages.dev'), /allow popups/i);
 });

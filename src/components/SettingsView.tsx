@@ -45,7 +45,8 @@ interface SettingsViewProps {
   currentUserId: string;
   googleConnected: boolean;
   googleEmail?: string | null;
-  onConnectGoogle: () => Promise<string>;
+  canUseRedirect?: boolean;
+  onConnectGoogle: (options?: { forceRedirect?: boolean }) => Promise<string | null>;
   onDisconnectGoogle: () => Promise<void>;
   onCreateShop: (shop: Shop, options?: { webhookUrl?: string; securityPin?: string }) => Promise<void>;
   onUpdateShop: (shop: Shop) => Promise<void>;
@@ -89,6 +90,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   currentUserId,
   googleConnected,
   googleEmail,
+  canUseRedirect = false,
   onConnectGoogle,
   onDisconnectGoogle,
   onCreateShop,
@@ -129,12 +131,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [googleError, setGoogleError] = useState('');
   const [googleSuccess, setGoogleSuccess] = useState('');
 
-  const handleConnectGoogleClick = async () => {
+  const handleConnectGoogleClick = async (forceRedirect = false) => {
     setConnectingGoogle(true);
     setGoogleError('');
     setGoogleSuccess('');
     try {
-      await onConnectGoogle();
+      const token = await onConnectGoogle(forceRedirect ? { forceRedirect: true } : undefined);
+      if (!token) {
+        return;
+      }
       if (!activeShop.spreadsheetId) {
         await onCreateSheetForShop(activeShop);
         setGoogleSuccess(
@@ -583,9 +588,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 role="alert"
                 className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800 flex items-start justify-between gap-3"
               >
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                  <span className="leading-relaxed break-all">{googleError}</span>
+                <div className="space-y-2 min-w-0">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    <span className="leading-relaxed break-all">{googleError}</span>
+                  </div>
+                  {canUseRedirect && !googleConnected && (
+                    <button
+                      type="button"
+                      disabled={connectingGoogle}
+                      onClick={() => void handleConnectGoogleClick(true)}
+                      className="h-8 px-3 rounded-lg bg-red-700 hover:bg-red-800 text-white text-xs font-semibold"
+                    >
+                      {lang === 'bn'
+                        ? 'Redirect দিয়ে যুক্ত করুন (মোবাইল বান্ধব)'
+                        : 'Connect via Redirect (Mobile Friendly)'}
+                    </button>
+                  )}
                 </div>
                 <button
                   type="button"

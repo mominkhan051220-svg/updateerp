@@ -7,7 +7,7 @@ interface CreateShopModalProps {
   lang: Language;
   googleConnected: boolean;
   googleEmail?: string | null;
-  onConnectGoogle: () => Promise<string>;
+  onConnectGoogle: () => Promise<string | null>;
   onCreateShop: (shop: Shop, options?: { webhookUrl?: string; securityPin?: string }) => Promise<void>;
   onClose: () => void;
 }
